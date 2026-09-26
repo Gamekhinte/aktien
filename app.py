@@ -3220,6 +3220,288 @@ def render_extreme_pattern_scanner():
             "Stichprobengröße, veränderte Marktbedingungen, Gebühren und Slippage sind hier nicht eingepreist."
         )
 
+PORTFOLIO_ACCOUNT_KEY = "autonomous_portfolio_v1"
+
+def load_portfolio_account(account_key: str, starting_cash: float, risk_percent: float) -> tuple[dict | None, list[dict]]:
+    """Lädt ein Multi-Positionen-Konto. 'position' speichert hier eine Liste offener Positionen."""
+    client = get_supabase_client()
+    if client is None:
+        return None, []
+    try:
+        result = client.table("scanner_paper_accounts").select("*").eq("account_key", account_key).maybe_single().execute()
+        row = result.data
+        if not row:
+            client.table("scanner_paper_accounts").insert({
+                "account_key": account_key, "cash": starting_cash,
+                "equity": starting_cash, "risk_percent": risk_percent,
+                "position": {"positions": []},
+            }).execute()
+            row = client.table("scanner_paper_accounts").select("*").eq("account_key", account_key).maybe_single().execute().data
+            if not row:
+                return None, []
+        stored = row.get("position") or {}
+        positions = stored.get("positions", []) if isinstance(stored, dict) else []
+        account = {
+            "cash": float(row["cash"]), "equity": float(row["equity"]),
+            "risk_percent": float(row["risk_percent"]), "positions": positions,
+            "events": [],
+        }
+        orders = (
+            client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
+            .eq("account_key", account_key).order("created_at", desc=True).limit(50).execute().data or []
+        )
+        return account, orders
+    except Exception:
+        return None, []
+
+def save_portfolio_account(account_key: str, account: dict, events: list[dict]) -> None:
+    client = get_supabase_client()
+    if client is None:
+        return
+    client.table("scanner_paper_accounts").update({
+        "cash": account["cash"], "equity": account["equity"],
+        "risk_percent": account["risk_percent"],
+        "position": {"positions": account["positions"]},
+        "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+    }).eq("account_key", account_key).execute()
+    for event in events:
+        client.table("scanner_paper_orders").insert({
+            "account_key": account_key,
+            "action": "BUY" if event["Aktion"] == "KAUF" else "SELL",
+            "ticker": event["Asset"], "price": event["Preis"], "units": event["Menge"],
+            "pnl": event["Ergebnis"], "reason": event["Warum"],
+            "signal": {"source": "autonomous_portfolio_bot"},
+        }).execute()
+
+def run_autonomous_portfolio_scan(
+    account: dict, interval_key: str, scan_limit: int, max_positions: int,
+) -> tuple[dict, pd.DataFrame]:
+    """
+    Prüft bestehende Positionen auf Stop/Ziel/Trendwechsel und eröffnet neue
+    Positionen (bis max_positions) für die besten aktuell erkannten Long-Setups.
+    Läuft komplett eigenständig — keine manuelle Auswahl nötig.
+    """
+    events: list[dict] = []
+    positions = account["positions"]
+    held_tickers = {p["ticker"] for p in positions}
+
+    # 1) Bestehende Positionen prüfen (Exit-Logik)
+    if held_tickers:
+        held_data = batch_load_ohlc(list(held_tickers), interval_key)
+        still_open = []
+        for position in positions:
+            ticker = position["ticker"]
+            df = held_data.get(ticker)
+            if df is None or df.empty:
+                still_open.append(position)  # Daten gerade nicht verfügbar: Position unangetastet lassen
+                continue
+            setup = calculate_trade_setup(df)
+            price = float(setup["entry"])
+            close_reason = None
+            if price <= position["stop"]:
+                close_reason = "Stop-Loss erreicht"
+            elif price >= position["target"]:
+                close_reason = "Take-Profit erreicht"
+            elif setup["direction"] == "short":
+                close_reason = "Trendwechsel: EMA/RSI geben ein Verkaufssignal"
+            if close_reason:
+                proceeds = position["units"] * price
+                account["cash"] += proceeds
+                pnl = proceeds - position["cost"]
+                events.append({
+                    "Zeit": str(df.iloc[-1]["Date"]), "Aktion": "VERKAUF", "Asset": ticker,
+                    "Preis": round(price, 4), "Menge": round(position["units"], 6),
+                    "Ergebnis": round(pnl, 2), "Warum": close_reason,
+                })
+            else:
+                still_open.append(position)
+        positions = still_open
+        held_tickers = {p["ticker"] for p in positions}
+
+    # 2) Neue Kandidaten suchen, solange Plätze frei sind
+    candidates_rows: list[dict] = []
+    free_slots = max_positions - len(positions)
+    if free_slots > 0 and account["cash"] > 1.0:
+        universe_items = [
+            (label, ticker) for label, ticker in list(SCANNER_UNIVERSE.items())[:scan_limit]
+            if ticker not in held_tickers
+        ]
+        scan_tickers = [ticker for _, ticker in universe_items]
+        label_by_ticker = {ticker: label for label, ticker in universe_items}
+        data_map = batch_load_ohlc(scan_tickers, interval_key)
+        candidates = []
+        for ticker, df in data_map.items():
+            try:
+                setup = calculate_trade_setup(df)
+                if not setup["signal"].startswith("KAUFEN") or setup["stop"] is None:
+                    continue
+                volume_score = min(float(setup.get("volume_ratio") or 0), 3.0)
+                rsi = float(setup.get("rsi") or 0)
+                score = volume_score * 10 + (70 - abs(60 - rsi))
+                candidates.append({
+                    "Asset": label_by_ticker.get(ticker, ticker), "Ticker": ticker,
+                    "Score": round(score, 1), "RSI": round(rsi, 1), "_df": df, "_setup": setup,
+                })
+            except Exception:
+                continue
+        candidates.sort(key=lambda item: item["Score"], reverse=True)
+        candidates_rows = [{k: v for k, v in c.items() if not k.startswith("_")} for c in candidates]
+
+        for candidate in candidates:
+            if free_slots <= 0 or account["cash"] <= 1.0:
+                break
+            setup = candidate["_setup"]
+            df = candidate["_df"]
+            price = float(setup["entry"])
+            risk_per_unit = max(price - float(setup["stop"]), 1e-9)
+            risk_budget = account["equity"] * account["risk_percent"] / 100
+            units = min(risk_budget / risk_per_unit, account["cash"] / price)
+            if units <= 0:
+                continue
+            cost = units * price
+            account["cash"] -= cost
+            positions.append({
+                "ticker": candidate["Ticker"], "units": units, "cost": cost,
+                "stop": float(setup["stop"]), "target": float(setup["target"]),
+                "entry_price": price, "opened_at": str(df.iloc[-1]["Date"]),
+            })
+            events.append({
+                "Zeit": str(df.iloc[-1]["Date"]), "Aktion": "KAUF", "Asset": candidate["Ticker"],
+                "Preis": round(price, 4), "Menge": round(units, 6), "Ergebnis": 0.0,
+                "Warum": f"Bestes verfügbares Long-Setup (Score {candidate['Score']}) unter freien Portfolio-Plätzen",
+            })
+            free_slots -= 1
+
+    account["positions"] = positions
+    position_value = sum(p["units"] * p.get("_last_price", p["cost"] / p["units"]) for p in positions) if positions else 0.0
+    account["equity"] = account["cash"] + position_value
+    account["events"] = events
+    return account, pd.DataFrame(candidates_rows)
+
+def render_autonomous_portfolio_bot():
+    with st.expander("Autonomer Portfolio-Bot · handelt selbstständig über mehrere Assets", expanded=False):
+        st.caption(
+            "Dieser Bot verwaltet ein gemeinsames, in Supabase gespeichertes Demo-Portfolio ohne echtes Geld. "
+            "Er prüft bestehende Positionen auf Stop-Loss/Take-Profit/Trendwechsel und eröffnet eigenständig neue "
+            "Long-Positionen, wenn ein Asset im Scan-Universum ein starkes Setup zeigt — bis zur eingestellten "
+            "Anzahl gleichzeitiger Positionen. Keine echten Orders, keine Anlageberatung."
+        )
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            portfolio_interval = st.selectbox("Intervall", ["1h", "1d"], index=1, key="portfolio_interval")
+        with col_b:
+            portfolio_scan_limit = st.slider(
+                "Scan-Umfang (Assets)", min_value=20, max_value=len(SCANNER_UNIVERSE),
+                value=min(150, len(SCANNER_UNIVERSE)), step=10, key="portfolio_scan_limit",
+            )
+        with col_c:
+            portfolio_max_positions = st.slider("Max. gleichzeitige Positionen", min_value=1, max_value=15, value=5, key="portfolio_max_positions")
+
+        cap_col, risk_col = st.columns(2)
+        with cap_col:
+            portfolio_cash = st.number_input("Startkapital (€)", min_value=100.0, value=10000.0, step=100.0, key="portfolio_cash")
+        with risk_col:
+            portfolio_risk = st.number_input("Risiko pro neuer Position (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1, key="portfolio_risk")
+
+        auto_refresh = st.checkbox(
+            "Alle 5 Min. automatisch prüfen & selbstständig handeln (nur solange Tab offen)",
+            value=False, key="portfolio_autorefresh", disabled=not _HAS_FRAGMENT,
+        )
+        if not _HAS_FRAGMENT:
+            st.caption("Automatische Ausführung benötigt Streamlit ≥ 1.37. Bitte manuell auf 'Jetzt prüfen' klicken.")
+        st.caption(
+            "Wichtig: Auch mit aktivierter Automatik läuft das nur, solange dieser Browser-Tab offen ist — "
+            "kein echter 24/7-Serverdienst. Für dauerhafte Überwachung bräuchte es einen extern gehosteten Dienst "
+            "oder einen kostenlosen Pinger, der die App wach hält, plus einen eigenen Cron-Trigger."
+        )
+
+        def _check_and_trade():
+            account, orders_before = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
+            if account is None:
+                st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
+                return
+            account["risk_percent"] = float(portfolio_risk)
+            account, candidates_df = run_autonomous_portfolio_scan(
+                account, portfolio_interval, portfolio_scan_limit, portfolio_max_positions,
+            )
+            save_portfolio_account(PORTFOLIO_ACCOUNT_KEY, account, account["events"])
+            st.session_state.portfolio_last_candidates = candidates_df
+            st.session_state.portfolio_last_run = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y %H:%M:%S")
+
+        if _HAS_FRAGMENT and auto_refresh:
+            @st.fragment(run_every=300)
+            def _portfolio_autorefresh_fragment():
+                with st.spinner("Prüfe Portfolio und scanne nach neuen Setups..."):
+                    _check_and_trade()
+                st.caption(f"Zuletzt automatisch geprüft: {st.session_state.get('portfolio_last_run', '–')} Uhr")
+            _portfolio_autorefresh_fragment()
+        elif st.button("Jetzt prüfen & ggf. handeln", key="run_portfolio_bot"):
+            with st.spinner("Prüfe Portfolio und scanne nach neuen Setups..."):
+                _check_and_trade()
+
+        account, orders = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
+        if account is None:
+            st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
+            return
+
+        last_run = st.session_state.get("portfolio_last_run")
+        if last_run:
+            st.caption(f"Letzte Prüfung: {last_run} Uhr")
+
+        positions = account["positions"]
+        held_tickers = [p["ticker"] for p in positions]
+        live_prices: dict[str, float] = {}
+        if held_tickers:
+            live_data = batch_load_ohlc(held_tickers, portfolio_interval)
+            for ticker, df in live_data.items():
+                if not df.empty:
+                    live_prices[ticker] = float(df.iloc[-1]["Close"])
+
+        position_value = sum(p["units"] * live_prices.get(p["ticker"], p["cost"] / p["units"]) for p in positions)
+        equity = account["cash"] + position_value
+
+        metric_a, metric_b, metric_c = st.columns(3)
+        metric_a.metric("Gesamtwert (Cash + Positionen)", f'{equity:.2f} €')
+        metric_b.metric("Freies Guthaben", f'{account["cash"]:.2f} €')
+        metric_c.metric("Offene Positionen", f'{len(positions)} / {portfolio_max_positions}')
+
+        st.markdown("**Offene Positionen — Live-Übersicht**")
+        if positions:
+            overview_rows = []
+            for p in positions:
+                current_price = live_prices.get(p["ticker"], p["cost"] / p["units"])
+                entry_price = p.get("entry_price", p["cost"] / p["units"])
+                unrealized = (current_price - entry_price) * p["units"]
+                unrealized_pct = ((current_price / entry_price) - 1) * 100 if entry_price else 0.0
+                overview_rows.append({
+                    "Ticker": p["ticker"], "Einstieg": round(entry_price, 4),
+                    "Aktueller Kurs": round(current_price, 4), "Stück": round(p["units"], 6),
+                    "Stop-Loss": round(p["stop"], 4), "Take-Profit": round(p["target"], 4),
+                    "Unreal. Ergebnis (€)": round(unrealized, 2), "Unreal. Ergebnis (%)": round(unrealized_pct, 2),
+                    "Eröffnet": p.get("opened_at", "–"),
+                })
+            st.dataframe(pd.DataFrame(overview_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Aktuell keine offenen Positionen. Der Bot eröffnet automatisch, sobald ein starkes Long-Setup im Scan-Universum auftaucht.")
+
+        candidates_df = st.session_state.get("portfolio_last_candidates")
+        if candidates_df is not None and not candidates_df.empty:
+            st.markdown("**Zuletzt beste gefundene Kauf-Kandidaten (nicht zwingend gekauft, falls Plätze/Kapital fehlten)**")
+            st.dataframe(candidates_df.head(10), use_container_width=True, hide_index=True)
+
+        if orders:
+            st.markdown("**Handelshistorie des Portfolio-Bots**")
+            display_orders = pd.DataFrame(orders).rename(columns={
+                "created_at": "Zeit", "action": "Aktion", "ticker": "Asset",
+                "price": "Preis", "units": "Menge", "pnl": "Ergebnis", "reason": "Warum",
+            })
+            st.dataframe(display_orders, use_container_width=True, hide_index=True)
+
+        st.caption(
+            "Keine Anlageberatung. Simulierter Handel ohne Gebühren, Slippage oder Orderausführungsrisiko — "
+            "reale Ergebnisse würden davon abweichen."
+        )
+
 def render_market_scanner_paper_bot():
     with st.expander("Markt-Scanner · gemeinsamer Demo-Bot", expanded=False):
         st.caption("Ein gemeinsames, in Supabase gespeichertes Paper-Konto. Der Scanner bewertet liquide Aktien, ETFs und Krypto und eröffnet höchstens eine Long-Position. Keine echten Orders.")
@@ -3271,6 +3553,7 @@ def render_market_scanner_paper_bot():
             st.warning("Chart konnte gerade nicht geladen werden.")
 
 render_market_scanner_paper_bot()
+render_autonomous_portfolio_bot()
 render_extreme_pattern_scanner()
 render_ml_predictor()
 
