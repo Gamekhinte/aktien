@@ -17,6 +17,7 @@ create index if not exists learning_examples_symbol_interval_idx
 create index if not exists learning_examples_feature_version_idx
   on public.learning_examples (feature_version);
 alter table public.learning_examples enable row level security;
+revoke all on table public.learning_examples from anon, authenticated;
 
 create table if not exists public.training_runs (
   id uuid primary key default gen_random_uuid(),
@@ -31,6 +32,7 @@ create table if not exists public.training_runs (
 create index if not exists training_runs_started_idx
   on public.training_runs (started_at desc);
 alter table public.training_runs enable row level security;
+revoke all on table public.training_runs from anon, authenticated;
 
 create table if not exists public.model_versions (
   id uuid primary key default gen_random_uuid(),
@@ -49,6 +51,7 @@ create index if not exists model_versions_created_idx
 create index if not exists model_versions_promoted_idx
   on public.model_versions (promoted, created_at desc);
 alter table public.model_versions enable row level security;
+revoke all on table public.model_versions from anon, authenticated;
 create unique index if not exists one_promoted_model_idx
   on public.model_versions (promoted) where promoted = true;
 
@@ -58,6 +61,7 @@ create table if not exists public.learning_state (
   updated_at timestamptz not null default now()
 );
 alter table public.learning_state enable row level security;
+revoke all on table public.learning_state from anon, authenticated;
 insert into public.learning_state (key, value)
 values ('global', jsonb_build_object(
   'active_model_id', null,
