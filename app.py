@@ -2401,8 +2401,6 @@ def render_paper_bot():
             if result["trades"]:
                 st.dataframe(pd.DataFrame(result["trades"]).tail(20), use_container_width=True, hide_index=True)
 
-render_paper_bot()
-
 def render_live_paper_trading():
     with st.expander("Live-Trading (Demo / Paper)", expanded=False):
         st.caption("Simulation mit aktuellen Yahoo-Finance-Kerzen. Es werden keine echten Broker-Orders gesendet und kein echtes Geld bewegt.")
@@ -2456,8 +2454,6 @@ def render_live_paper_trading():
         elif price is not None:
             st.caption("Noch keine Order. Der Bot wartet auf ein Long-Signal nach seiner EMA-/RSI-Regel.")
 
-render_live_paper_trading()
-
 def render_market_scanner_paper_bot():
     with st.expander("Markt-Scanner · gemeinsamer Demo-Bot", expanded=False):
         st.caption("Ein gemeinsames, in Supabase gespeichertes Paper-Konto. Der Scanner bewertet liquide Aktien, ETFs und Krypto und eröffnet höchstens eine Long-Position. Keine echten Orders.")
@@ -2495,6 +2491,18 @@ def render_market_scanner_paper_bot():
             st.markdown("**Dauerhafte Demo-Order-Historie**")
             display_orders = pd.DataFrame(orders).rename(columns={"created_at": "Zeit", "action": "Aktion", "ticker": "Asset", "price": "Preis", "units": "Menge", "pnl": "Ergebnis", "reason": "Warum"})
             st.dataframe(display_orders, use_container_width=True, hide_index=True)
+
+        st.markdown("**Chart ansehen**")
+        chart_label = st.selectbox("Scanner-Chart-Asset", list(SCANNER_UNIVERSE.keys()), key="scanner_chart_asset")
+        chart_ticker = SCANNER_UNIVERSE[chart_label]
+        try:
+            chart_data = load_data(chart_ticker, scanner_interval, "Yahoo Finance")
+            if not chart_data.empty:
+                render_candlestick_chart(chart_data, "Scanner-Chart", chart_ticker)
+            else:
+                st.warning("Für dieses Chart sind gerade keine Marktdaten verfügbar.")
+        except Exception:
+            st.warning("Chart konnte gerade nicht geladen werden.")
 
 render_market_scanner_paper_bot()
 render_ml_predictor()
