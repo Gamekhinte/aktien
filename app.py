@@ -822,7 +822,7 @@ with st.expander("Marktdatenquelle", expanded=False):
 # ------------------------------------------------------------
 # Daten laden
 # ------------------------------------------------------------
-def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> pd.DataFrame:
+def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance", period_override: str | None = None, max_candles: int = 1000) -> pd.DataFrame:
     if source == "Interactive Brokers Paper-Feed":
         feed = st.session_state.get("ibkr_feed")
         if feed is None or not feed.connected:
@@ -830,7 +830,8 @@ def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> 
         return feed.fetch_bars(ticker, interval_key)
 
     cfg = INTERVAL_CONFIG[interval_key]
-    df = yf.download(ticker, period=cfg["period"], interval=cfg["yf_interval"], progress=False)
+    period = period_override or cfg["period"]
+    df = yf.download(ticker, period=period, interval=cfg["yf_interval"], progress=False)
 
     if df.empty:
         return df
@@ -845,7 +846,8 @@ def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> 
         }).dropna()
 
     df = df.dropna()
-    df = df.tail(1000)
+    if max_candles:
+        df = df.tail(max_candles)
     df = df.reset_index()
     date_col = df.columns[0]
     df = df.rename(columns={date_col: "Date"})
@@ -1535,7 +1537,7 @@ def simulate_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
     }
 
 def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: float,
-                        min_trades: int = 8) -> dict:
+                        min_trades: int = 8, min_holdout_trades: int = 3) -> dict:
     """
     Grid-Search über EMA/RSI/ATR/Chance-Risiko-Kombinationen.
     Bewertet wird ausschließlich auf einem Out-of-Sample-Holdout-Zeitraum,
@@ -1569,7 +1571,7 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
             continue
 
         holdout_result = simulate_paper_bot(holdout_df, initial_capital, risk_percent, params)
-        if holdout_result["trade_count"] < 3:
+        if holdout_result["trade_count"] < min_holdout_trades:
             continue
 
         score = holdout_result["return_percent"]
@@ -2331,10 +2333,25 @@ render_market_hours()
 
 def render_paper_bot():
     with st.expander("Paper-Bot trainieren", expanded=False):
-        st.caption("Yahoo-Finance-Daten werden in Trainings- und Testabschnitt geteilt. Es werden nur virtuelle Trades simuliert.")
+        st.caption(
+            "Das hier ist kein KI-Modell, sondern eine feste Regel (EMA-Kreuzung + RSI + ATR-Stop). "
+            "Die Regel lernt nichts - sie feuert einfach nur, wenn ihre Bedingung erfüllt ist. "
+            "Yahoo-Finance-Daten werden in Trainings- und Testabschnitt geteilt, es werden nur virtuelle Trades simuliert."
+        )
         bot_options = list(ASSETS.keys()) + st.session_state.watchlist
         bot_asset = st.selectbox("Bot-Asset", bot_options, key="bot_asset")
         bot_interval = st.selectbox("Bot-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="bot_interval")
+
+        history_options = {
+            "1 Jahr": "1y", "2 Jahre": "2y", "5 Jahre": "5y", "10 Jahre": "10y", "Maximal verfügbar": "max",
+        }
+        bot_history_label = st.selectbox(
+            "Wie viel Historie simulieren?", list(history_options.keys()),
+            index=2, key="bot_history",
+            help="Mehr Historie = mehr mögliche Trades, aber bei Intraday-Intervallen begrenzt Yahoo Finance die Verfügbarkeit ohnehin (z.B. 1m nur 7 Tage).",
+        )
+        bot_period_override = history_options[bot_history_label]
+
         bot_capital, bot_risk = st.columns(2)
         with bot_capital:
             bot_initial_capital = st.number_input("Startkapital (€)", min_value=100.0, value=1000.0, step=100.0, key="bot_capital")
@@ -2345,19 +2362,28 @@ def render_paper_bot():
             "Parameter automatisch optimieren (Grid-Search, out-of-sample getestet)",
             value=True, key="bot_optimize",
         )
+        bot_min_trades = st.number_input(
+            "Mind. Trades im Trainingsabschnitt, damit eine Parameter-Kombi zählt", min_value=1, max_value=100,
+            value=8, step=1, key="bot_min_trades",
+            help="Niedriger = mehr Kombinationen werden zugelassen, aber die Statistik pro Kombi wird unsicherer.",
+        )
+        bot_min_holdout_trades = st.number_input(
+            "Mind. Trades im Test-/Holdout-Abschnitt", min_value=1, max_value=50,
+            value=3, step=1, key="bot_min_holdout_trades",
+        )
 
         if st.button("Simulation starten", key="run_paper_bot"):
             ticker = ASSETS.get(bot_asset) or bot_asset
             with st.spinner("Historische Yahoo-Finance-Daten werden getestet..."):
-                bot_df = load_data(ticker, bot_interval, "Yahoo Finance")
+                bot_df = load_data(ticker, bot_interval, "Yahoo Finance", period_override=bot_period_override, max_candles=0)
                 if bot_df.empty or len(bot_df) < 150:
                     st.error("Für diese Simulation werden mindestens 150 Kerzen benötigt.")
                     st.session_state.paper_bot_result = None
                     st.session_state.paper_bot_best_params = None
                 elif auto_optimize:
-                    best = optimize_paper_bot(bot_df, bot_initial_capital, bot_risk_percent)
+                    best = optimize_paper_bot(bot_df, bot_initial_capital, bot_risk_percent, min_trades=int(bot_min_trades), min_holdout_trades=int(bot_min_holdout_trades))
                     if best is None:
-                        st.warning("Keine Parameter-Kombination hat genug Trades erzeugt. Versuch ein anderes Intervall/Asset oder deaktiviere die Optimierung.")
+                        st.warning("Keine Parameter-Kombination hat genug Trades erzeugt. Versuch mehr Historie, ein anderes Intervall/Asset, oder senk die Mindest-Trades-Schwelle.")
                         st.session_state.paper_bot_result = None
                         st.session_state.paper_bot_best_params = None
                     else:
