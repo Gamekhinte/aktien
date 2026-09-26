@@ -2,7 +2,7 @@
 # 📊 Crypto & Stock Pattern Analyzer – app.py
 # ============================================================
 # requirements.txt (Streamlit Cloud):
-#   streamlit
+#   streamlit>=1.37   # >=1.37 wird für die automatische Live-Scan-Aktualisierung (st.fragment) benötigt
 #   yfinance
 #   pandas
 #   numpy
@@ -56,13 +56,601 @@ AUTO_TRAIN_MIN_NEW_EXAMPLES = 100
 MODEL_ALGORITHM = "GradientBoostingClassifier"
 TRAINING_MIN_SAMPLES = 200
 SCANNER_ACCOUNT_KEY = "shared_scanner_v1"
-SCANNER_UNIVERSE = {
-    "Bitcoin": "BTC-USD", "Ethereum": "ETH-USD", "Solana": "SOL-USD",
-    "Apple": "AAPL", "Microsoft": "MSFT", "NVIDIA": "NVDA", "Amazon": "AMZN",
-    "Alphabet": "GOOGL", "Meta": "META", "Tesla": "TSLA", "AMD": "AMD",
-    "Netflix": "NFLX", "Coinbase": "COIN", "Berkshire Hathaway": "BRK-B",
-    "S&P 500 ETF": "SPY", "Nasdaq 100 ETF": "QQQ", "Gold ETF": "GLD",
-}
+SCANNER_UNIVERSE: dict[str, str] = {}
+# --- ETFs ---
+SCANNER_UNIVERSE["S&P 500 ETF"] = "SPY"
+SCANNER_UNIVERSE["Nasdaq 100 ETF"] = "QQQ"
+SCANNER_UNIVERSE["Dow Jones ETF"] = "DIA"
+SCANNER_UNIVERSE["Russell 2000 ETF"] = "IWM"
+SCANNER_UNIVERSE["Gold ETF"] = "GLD"
+SCANNER_UNIVERSE["Silber ETF"] = "SLV"
+SCANNER_UNIVERSE["Total US Market ETF"] = "VTI"
+SCANNER_UNIVERSE["Vanguard S&P 500 ETF"] = "VOO"
+# --- Kryptowaehrungen (Top ~75 nach Marktkapitalisierung) ---
+SCANNER_UNIVERSE["Bitcoin"] = "BTC-USD"
+SCANNER_UNIVERSE["Ethereum"] = "ETH-USD"
+SCANNER_UNIVERSE["BNB"] = "BNB-USD"
+SCANNER_UNIVERSE["Solana"] = "SOL-USD"
+SCANNER_UNIVERSE["XRP"] = "XRP-USD"
+SCANNER_UNIVERSE["Cardano"] = "ADA-USD"
+SCANNER_UNIVERSE["Dogecoin"] = "DOGE-USD"
+SCANNER_UNIVERSE["Avalanche"] = "AVAX-USD"
+SCANNER_UNIVERSE["TRON"] = "TRX-USD"
+SCANNER_UNIVERSE["Chainlink"] = "LINK-USD"
+SCANNER_UNIVERSE["Polkadot"] = "DOT-USD"
+SCANNER_UNIVERSE["Polygon"] = "MATIC-USD"
+SCANNER_UNIVERSE["Shiba Inu"] = "SHIB-USD"
+SCANNER_UNIVERSE["Litecoin"] = "LTC-USD"
+SCANNER_UNIVERSE["Bitcoin Cash"] = "BCH-USD"
+SCANNER_UNIVERSE["NEAR Protocol"] = "NEAR-USD"
+SCANNER_UNIVERSE["Uniswap"] = "UNI-USD"
+SCANNER_UNIVERSE["Internet Computer"] = "ICP-USD"
+SCANNER_UNIVERSE["Stellar"] = "XLM-USD"
+SCANNER_UNIVERSE["Ethereum Classic"] = "ETC-USD"
+SCANNER_UNIVERSE["Filecoin"] = "FIL-USD"
+SCANNER_UNIVERSE["Cosmos"] = "ATOM-USD"
+SCANNER_UNIVERSE["Hedera"] = "HBAR-USD"
+SCANNER_UNIVERSE["VeChain"] = "VET-USD"
+SCANNER_UNIVERSE["Optimism"] = "OP-USD"
+SCANNER_UNIVERSE["Maker"] = "MKR-USD"
+SCANNER_UNIVERSE["The Graph"] = "GRT-USD"
+SCANNER_UNIVERSE["Algorand"] = "ALGO-USD"
+SCANNER_UNIVERSE["Aave"] = "AAVE-USD"
+SCANNER_UNIVERSE["Quant"] = "QNT-USD"
+SCANNER_UNIVERSE["MultiversX"] = "EGLD-USD"
+SCANNER_UNIVERSE["The Sandbox"] = "SAND-USD"
+SCANNER_UNIVERSE["Decentraland"] = "MANA-USD"
+SCANNER_UNIVERSE["Tezos"] = "XTZ-USD"
+SCANNER_UNIVERSE["Theta Network"] = "THETA-USD"
+SCANNER_UNIVERSE["EOS"] = "EOS-USD"
+SCANNER_UNIVERSE["Flow"] = "FLOW-USD"
+SCANNER_UNIVERSE["Chiliz"] = "CHZ-USD"
+SCANNER_UNIVERSE["Kava"] = "KAVA-USD"
+SCANNER_UNIVERSE["Monero"] = "XMR-USD"
+SCANNER_UNIVERSE["Cronos"] = "CRO-USD"
+SCANNER_UNIVERSE["THORChain"] = "RUNE-USD"
+SCANNER_UNIVERSE["Fantom"] = "FTM-USD"
+SCANNER_UNIVERSE["Injective"] = "INJ-USD"
+SCANNER_UNIVERSE["Render"] = "RNDR-USD"
+SCANNER_UNIVERSE["dogwifhat"] = "WIF-USD"
+SCANNER_UNIVERSE["Celestia"] = "TIA-USD"
+SCANNER_UNIVERSE["Sei"] = "SEI-USD"
+SCANNER_UNIVERSE["Kaspa"] = "KAS-USD"
+SCANNER_UNIVERSE["Bonk"] = "BONK-USD"
+SCANNER_UNIVERSE["Jupiter"] = "JUP-USD"
+SCANNER_UNIVERSE["Pyth Network"] = "PYTH-USD"
+SCANNER_UNIVERSE["Ethena"] = "ENA-USD"
+SCANNER_UNIVERSE["Ondo"] = "ONDO-USD"
+SCANNER_UNIVERSE["JasmyCoin"] = "JASMY-USD"
+SCANNER_UNIVERSE["Gala"] = "GALA-USD"
+SCANNER_UNIVERSE["Mina Protocol"] = "MINA-USD"
+SCANNER_UNIVERSE["Arweave"] = "AR-USD"
+SCANNER_UNIVERSE["Oasis Network"] = "ROSE-USD"
+SCANNER_UNIVERSE["Zilliqa"] = "ZIL-USD"
+SCANNER_UNIVERSE["Ankr"] = "ANKR-USD"
+SCANNER_UNIVERSE["Enjin Coin"] = "ENJ-USD"
+SCANNER_UNIVERSE["Basic Attention Token"] = "BAT-USD"
+SCANNER_UNIVERSE["0x Protocol"] = "ZRX-USD"
+SCANNER_UNIVERSE["Compound"] = "COMP-USD"
+SCANNER_UNIVERSE["Synthetix"] = "SNX-USD"
+SCANNER_UNIVERSE["yearn.finance"] = "YFI-USD"
+SCANNER_UNIVERSE["Curve DAO"] = "CRV-USD"
+SCANNER_UNIVERSE["Lido DAO"] = "LDO-USD"
+SCANNER_UNIVERSE["dYdX"] = "DYDX-USD"
+SCANNER_UNIVERSE["GMX"] = "GMX-USD"
+SCANNER_UNIVERSE["1inch"] = "1INCH-USD"
+SCANNER_UNIVERSE["SushiSwap"] = "SUSHI-USD"
+SCANNER_UNIVERSE["Convex Finance"] = "CVX-USD"
+SCANNER_UNIVERSE["Kusama"] = "KSM-USD"
+SCANNER_UNIVERSE["Waves"] = "WAVES-USD"
+SCANNER_UNIVERSE["IOTA"] = "IOTA-USD"
+SCANNER_UNIVERSE["NEO"] = "NEO-USD"
+SCANNER_UNIVERSE["Dash"] = "DASH-USD"
+SCANNER_UNIVERSE["Zcash"] = "ZEC-USD"
+SCANNER_UNIVERSE["Qtum"] = "QTUM-USD"
+# --- S&P 500 Aktien (alle aktuellen Mitglieder) ---
+SCANNER_UNIVERSE["Agilent Technologies"] = "A"
+SCANNER_UNIVERSE["Apple Inc."] = "AAPL"
+SCANNER_UNIVERSE["AbbVie"] = "ABBV"
+SCANNER_UNIVERSE["Airbnb"] = "ABNB"
+SCANNER_UNIVERSE["Abbott Laboratories"] = "ABT"
+SCANNER_UNIVERSE["Arch Capital Group"] = "ACGL"
+SCANNER_UNIVERSE["Accenture"] = "ACN"
+SCANNER_UNIVERSE["Adobe Inc."] = "ADBE"
+SCANNER_UNIVERSE["Analog Devices"] = "ADI"
+SCANNER_UNIVERSE["Archer Daniels Midland"] = "ADM"
+SCANNER_UNIVERSE["Automatic Data Processing"] = "ADP"
+SCANNER_UNIVERSE["Autodesk"] = "ADSK"
+SCANNER_UNIVERSE["Ameren"] = "AEE"
+SCANNER_UNIVERSE["American Electric Power"] = "AEP"
+SCANNER_UNIVERSE["AES Corporation"] = "AES"
+SCANNER_UNIVERSE["Aflac"] = "AFL"
+SCANNER_UNIVERSE["American International Group"] = "AIG"
+SCANNER_UNIVERSE["Assurant"] = "AIZ"
+SCANNER_UNIVERSE["Arthur J. Gallagher & Co."] = "AJG"
+SCANNER_UNIVERSE["Akamai Technologies"] = "AKAM"
+SCANNER_UNIVERSE["Albemarle Corporation"] = "ALB"
+SCANNER_UNIVERSE["Align Technology"] = "ALGN"
+SCANNER_UNIVERSE["Allstate"] = "ALL"
+SCANNER_UNIVERSE["Allegion"] = "ALLE"
+SCANNER_UNIVERSE["Applied Materials"] = "AMAT"
+SCANNER_UNIVERSE["Amcor"] = "AMCR"
+SCANNER_UNIVERSE["Advanced Micro Devices"] = "AMD"
+SCANNER_UNIVERSE["Ametek"] = "AME"
+SCANNER_UNIVERSE["Amgen"] = "AMGN"
+SCANNER_UNIVERSE["Ameriprise Financial"] = "AMP"
+SCANNER_UNIVERSE["American Tower"] = "AMT"
+SCANNER_UNIVERSE["Amazon"] = "AMZN"
+SCANNER_UNIVERSE["Arista Networks"] = "ANET"
+SCANNER_UNIVERSE["Aon plc"] = "AON"
+SCANNER_UNIVERSE["A. O. Smith"] = "AOS"
+SCANNER_UNIVERSE["APA Corporation"] = "APA"
+SCANNER_UNIVERSE["Air Products"] = "APD"
+SCANNER_UNIVERSE["Amphenol"] = "APH"
+SCANNER_UNIVERSE["Apollo Global Management"] = "APO"
+SCANNER_UNIVERSE["AppLovin"] = "APP"
+SCANNER_UNIVERSE["Aptiv"] = "APTV"
+SCANNER_UNIVERSE["Alexandria Real Estate Equities"] = "ARE"
+SCANNER_UNIVERSE["Ares Management"] = "ARES"
+SCANNER_UNIVERSE["Atmos Energy"] = "ATO"
+SCANNER_UNIVERSE["AvalonBay Communities"] = "AVB"
+SCANNER_UNIVERSE["Broadcom"] = "AVGO"
+SCANNER_UNIVERSE["Avery Dennison"] = "AVY"
+SCANNER_UNIVERSE["American Water Works"] = "AWK"
+SCANNER_UNIVERSE["Axon Enterprise"] = "AXON"
+SCANNER_UNIVERSE["American Express"] = "AXP"
+SCANNER_UNIVERSE["AutoZone"] = "AZO"
+SCANNER_UNIVERSE["Boeing"] = "BA"
+SCANNER_UNIVERSE["Bank of America"] = "BAC"
+SCANNER_UNIVERSE["Ball Corporation"] = "BALL"
+SCANNER_UNIVERSE["Baxter International"] = "BAX"
+SCANNER_UNIVERSE["Best Buy"] = "BBY"
+SCANNER_UNIVERSE["Becton Dickinson"] = "BDX"
+SCANNER_UNIVERSE["Franklin Resources"] = "BEN"
+SCANNER_UNIVERSE["Brown–Forman"] = "BF-B"
+SCANNER_UNIVERSE["Bunge Global"] = "BG"
+SCANNER_UNIVERSE["Biogen"] = "BIIB"
+SCANNER_UNIVERSE["Booking Holdings"] = "BKNG"
+SCANNER_UNIVERSE["Baker Hughes"] = "BKR"
+SCANNER_UNIVERSE["Builders FirstSource"] = "BLDR"
+SCANNER_UNIVERSE["BlackRock"] = "BLK"
+SCANNER_UNIVERSE["Bristol Myers Squibb"] = "BMY"
+SCANNER_UNIVERSE["BNY Mellon"] = "BNY"
+SCANNER_UNIVERSE["Broadridge Financial Solutions"] = "BR"
+SCANNER_UNIVERSE["Berkshire Hathaway"] = "BRK-B"
+SCANNER_UNIVERSE["Brown & Brown"] = "BRO"
+SCANNER_UNIVERSE["Boston Scientific"] = "BSX"
+SCANNER_UNIVERSE["Blackstone Inc."] = "BX"
+SCANNER_UNIVERSE["BXP, Inc."] = "BXP"
+SCANNER_UNIVERSE["Citigroup"] = "C"
+SCANNER_UNIVERSE["Cardinal Health"] = "CAH"
+SCANNER_UNIVERSE["Carrier Global"] = "CARR"
+SCANNER_UNIVERSE["Casey's"] = "CASY"
+SCANNER_UNIVERSE["Caterpillar Inc."] = "CAT"
+SCANNER_UNIVERSE["Chubb Limited"] = "CB"
+SCANNER_UNIVERSE["Cboe Global Markets"] = "CBOE"
+SCANNER_UNIVERSE["CBRE Group"] = "CBRE"
+SCANNER_UNIVERSE["Crown Castle"] = "CCI"
+SCANNER_UNIVERSE["Carnival Corporation"] = "CCL"
+SCANNER_UNIVERSE["Cadence Design Systems"] = "CDNS"
+SCANNER_UNIVERSE["CDW Corporation"] = "CDW"
+SCANNER_UNIVERSE["Constellation Energy"] = "CEG"
+SCANNER_UNIVERSE["CF Industries"] = "CF"
+SCANNER_UNIVERSE["Citizens Financial Group"] = "CFG"
+SCANNER_UNIVERSE["Church & Dwight"] = "CHD"
+SCANNER_UNIVERSE["C.H. Robinson"] = "CHRW"
+SCANNER_UNIVERSE["Charter Communications"] = "CHTR"
+SCANNER_UNIVERSE["Cigna"] = "CI"
+SCANNER_UNIVERSE["Ciena"] = "CIEN"
+SCANNER_UNIVERSE["Cincinnati Financial"] = "CINF"
+SCANNER_UNIVERSE["Colgate-Palmolive"] = "CL"
+SCANNER_UNIVERSE["Clorox"] = "CLX"
+SCANNER_UNIVERSE["Comcast"] = "CMCSA"
+SCANNER_UNIVERSE["CME Group"] = "CME"
+SCANNER_UNIVERSE["Chipotle Mexican Grill"] = "CMG"
+SCANNER_UNIVERSE["Cummins"] = "CMI"
+SCANNER_UNIVERSE["CMS Energy"] = "CMS"
+SCANNER_UNIVERSE["Centene Corporation"] = "CNC"
+SCANNER_UNIVERSE["CenterPoint Energy"] = "CNP"
+SCANNER_UNIVERSE["Capital One"] = "COF"
+SCANNER_UNIVERSE["Coherent Corp."] = "COHR"
+SCANNER_UNIVERSE["Coinbase"] = "COIN"
+SCANNER_UNIVERSE["Cooper Companies (The)"] = "COO"
+SCANNER_UNIVERSE["ConocoPhillips"] = "COP"
+SCANNER_UNIVERSE["Cencora"] = "COR"
+SCANNER_UNIVERSE["Costco"] = "COST"
+SCANNER_UNIVERSE["Corpay"] = "CPAY"
+SCANNER_UNIVERSE["Copart"] = "CPRT"
+SCANNER_UNIVERSE["Camden Property Trust"] = "CPT"
+SCANNER_UNIVERSE["CRH plc"] = "CRH"
+SCANNER_UNIVERSE["Charles River Laboratories"] = "CRL"
+SCANNER_UNIVERSE["Salesforce"] = "CRM"
+SCANNER_UNIVERSE["CrowdStrike"] = "CRWD"
+SCANNER_UNIVERSE["Cisco"] = "CSCO"
+SCANNER_UNIVERSE["CoStar Group"] = "CSGP"
+SCANNER_UNIVERSE["CSX Corporation"] = "CSX"
+SCANNER_UNIVERSE["Cintas"] = "CTAS"
+SCANNER_UNIVERSE["Cognizant"] = "CTSH"
+SCANNER_UNIVERSE["Corteva"] = "CTVA"
+SCANNER_UNIVERSE["Carvana"] = "CVNA"
+SCANNER_UNIVERSE["CVS Health"] = "CVS"
+SCANNER_UNIVERSE["Chevron Corporation"] = "CVX"
+SCANNER_UNIVERSE["Dominion Energy"] = "D"
+SCANNER_UNIVERSE["Delta Air Lines"] = "DAL"
+SCANNER_UNIVERSE["DoorDash"] = "DASH"
+SCANNER_UNIVERSE["DuPont"] = "DD"
+SCANNER_UNIVERSE["Datadog"] = "DDOG"
+SCANNER_UNIVERSE["Deere & Company"] = "DE"
+SCANNER_UNIVERSE["Deckers Brands"] = "DECK"
+SCANNER_UNIVERSE["Dell Technologies"] = "DELL"
+SCANNER_UNIVERSE["Dollar General"] = "DG"
+SCANNER_UNIVERSE["Quest Diagnostics"] = "DGX"
+SCANNER_UNIVERSE["D. R. Horton"] = "DHI"
+SCANNER_UNIVERSE["Danaher Corporation"] = "DHR"
+SCANNER_UNIVERSE["Walt Disney Company (The)"] = "DIS"
+SCANNER_UNIVERSE["Digital Realty"] = "DLR"
+SCANNER_UNIVERSE["Dollar Tree"] = "DLTR"
+SCANNER_UNIVERSE["Healthpeak Properties"] = "DOC"
+SCANNER_UNIVERSE["Dover Corporation"] = "DOV"
+SCANNER_UNIVERSE["Dow Inc."] = "DOW"
+SCANNER_UNIVERSE["Domino's"] = "DPZ"
+SCANNER_UNIVERSE["Darden Restaurants"] = "DRI"
+SCANNER_UNIVERSE["DTE Energy"] = "DTE"
+SCANNER_UNIVERSE["Duke Energy"] = "DUK"
+SCANNER_UNIVERSE["DaVita"] = "DVA"
+SCANNER_UNIVERSE["Devon Energy"] = "DVN"
+SCANNER_UNIVERSE["Dexcom"] = "DXCM"
+SCANNER_UNIVERSE["Electronic Arts"] = "EA"
+SCANNER_UNIVERSE["eBay Inc."] = "EBAY"
+SCANNER_UNIVERSE["EchoStar"] = "ECHO"
+SCANNER_UNIVERSE["Ecolab"] = "ECL"
+SCANNER_UNIVERSE["Consolidated Edison"] = "ED"
+SCANNER_UNIVERSE["Equifax"] = "EFX"
+SCANNER_UNIVERSE["Everest Group"] = "EG"
+SCANNER_UNIVERSE["Edison International"] = "EIX"
+SCANNER_UNIVERSE["Estée Lauder Companies (The)"] = "EL"
+SCANNER_UNIVERSE["Elevance Health"] = "ELV"
+SCANNER_UNIVERSE["Emcor"] = "EME"
+SCANNER_UNIVERSE["Emerson Electric"] = "EMR"
+SCANNER_UNIVERSE["EOG Resources"] = "EOG"
+SCANNER_UNIVERSE["Equinix"] = "EQIX"
+SCANNER_UNIVERSE["Equity Residential"] = "EQR"
+SCANNER_UNIVERSE["EQT Corporation"] = "EQT"
+SCANNER_UNIVERSE["Erie Indemnity"] = "ERIE"
+SCANNER_UNIVERSE["Eversource Energy"] = "ES"
+SCANNER_UNIVERSE["Essex Property Trust"] = "ESS"
+SCANNER_UNIVERSE["Eaton Corporation"] = "ETN"
+SCANNER_UNIVERSE["Entergy"] = "ETR"
+SCANNER_UNIVERSE["Evergy"] = "EVRG"
+SCANNER_UNIVERSE["Edwards Lifesciences"] = "EW"
+SCANNER_UNIVERSE["Exelon"] = "EXC"
+SCANNER_UNIVERSE["Expand Energy"] = "EXE"
+SCANNER_UNIVERSE["Expeditors International"] = "EXPD"
+SCANNER_UNIVERSE["Expedia Group"] = "EXPE"
+SCANNER_UNIVERSE["Extra Space Storage"] = "EXR"
+SCANNER_UNIVERSE["Ford Motor Company"] = "F"
+SCANNER_UNIVERSE["Diamondback Energy"] = "FANG"
+SCANNER_UNIVERSE["Fastenal"] = "FAST"
+SCANNER_UNIVERSE["Freeport-McMoRan"] = "FCX"
+SCANNER_UNIVERSE["FactSet"] = "FDS"
+SCANNER_UNIVERSE["FedEx"] = "FDX"
+SCANNER_UNIVERSE["FedEx Freight"] = "FDXF"
+SCANNER_UNIVERSE["FirstEnergy"] = "FE"
+SCANNER_UNIVERSE["F5, Inc."] = "FFIV"
+SCANNER_UNIVERSE["Fair Isaac"] = "FICO"
+SCANNER_UNIVERSE["Fidelity National Information Services"] = "FIS"
+SCANNER_UNIVERSE["Fiserv"] = "FISV"
+SCANNER_UNIVERSE["Fifth Third Bancorp"] = "FITB"
+SCANNER_UNIVERSE["Comfort Systems USA"] = "FIX"
+SCANNER_UNIVERSE["Flex Ltd."] = "FLEX"
+SCANNER_UNIVERSE["Fox Corporation (Class B)"] = "FOX"
+SCANNER_UNIVERSE["Fox Corporation (Class A)"] = "FOXA"
+SCANNER_UNIVERSE["Federal Realty Investment Trust"] = "FRT"
+SCANNER_UNIVERSE["First Solar"] = "FSLR"
+SCANNER_UNIVERSE["Fortinet"] = "FTNT"
+SCANNER_UNIVERSE["Fortive"] = "FTV"
+SCANNER_UNIVERSE["General Dynamics"] = "GD"
+SCANNER_UNIVERSE["GoDaddy"] = "GDDY"
+SCANNER_UNIVERSE["GE Aerospace"] = "GE"
+SCANNER_UNIVERSE["GE HealthCare"] = "GEHC"
+SCANNER_UNIVERSE["Gen Digital"] = "GEN"
+SCANNER_UNIVERSE["GE Vernova"] = "GEV"
+SCANNER_UNIVERSE["Gilead Sciences"] = "GILD"
+SCANNER_UNIVERSE["General Mills"] = "GIS"
+SCANNER_UNIVERSE["Globe Life"] = "GL"
+SCANNER_UNIVERSE["Corning Inc."] = "GLW"
+SCANNER_UNIVERSE["General Motors"] = "GM"
+SCANNER_UNIVERSE["Generac"] = "GNRC"
+SCANNER_UNIVERSE["Alphabet Inc. (Class C)"] = "GOOG"
+SCANNER_UNIVERSE["Alphabet Inc. (Class A)"] = "GOOGL"
+SCANNER_UNIVERSE["Genuine Parts Company"] = "GPC"
+SCANNER_UNIVERSE["Global Payments"] = "GPN"
+SCANNER_UNIVERSE["Garmin"] = "GRMN"
+SCANNER_UNIVERSE["Goldman Sachs"] = "GS"
+SCANNER_UNIVERSE["W. W. Grainger"] = "GWW"
+SCANNER_UNIVERSE["Halliburton"] = "HAL"
+SCANNER_UNIVERSE["Hasbro"] = "HAS"
+SCANNER_UNIVERSE["Huntington Bancshares"] = "HBAN"
+SCANNER_UNIVERSE["HCA Healthcare"] = "HCA"
+SCANNER_UNIVERSE["Home Depot (The)"] = "HD"
+SCANNER_UNIVERSE["Hartford (The)"] = "HIG"
+SCANNER_UNIVERSE["Huntington Ingalls Industries"] = "HII"
+SCANNER_UNIVERSE["Hilton Worldwide"] = "HLT"
+SCANNER_UNIVERSE["Honeywell Technologies"] = "HON"
+SCANNER_UNIVERSE["Honeywell Aerospace"] = "HONA"
+SCANNER_UNIVERSE["Robinhood Markets"] = "HOOD"
+SCANNER_UNIVERSE["Hewlett Packard Enterprise"] = "HPE"
+SCANNER_UNIVERSE["HP Inc."] = "HPQ"
+SCANNER_UNIVERSE["Hormel Foods"] = "HRL"
+SCANNER_UNIVERSE["Henry Schein"] = "HSIC"
+SCANNER_UNIVERSE["Host Hotels & Resorts"] = "HST"
+SCANNER_UNIVERSE["Hershey Company (The)"] = "HSY"
+SCANNER_UNIVERSE["Hubbell Incorporated"] = "HUBB"
+SCANNER_UNIVERSE["Humana"] = "HUM"
+SCANNER_UNIVERSE["Howmet Aerospace"] = "HWM"
+SCANNER_UNIVERSE["Interactive Brokers"] = "IBKR"
+SCANNER_UNIVERSE["IBM"] = "IBM"
+SCANNER_UNIVERSE["Intercontinental Exchange"] = "ICE"
+SCANNER_UNIVERSE["Idexx Laboratories"] = "IDXX"
+SCANNER_UNIVERSE["IDEX Corporation"] = "IEX"
+SCANNER_UNIVERSE["International Flavors & Fragrances"] = "IFF"
+SCANNER_UNIVERSE["Incyte"] = "INCY"
+SCANNER_UNIVERSE["Intel"] = "INTC"
+SCANNER_UNIVERSE["Intuit"] = "INTU"
+SCANNER_UNIVERSE["Invitation Homes"] = "INVH"
+SCANNER_UNIVERSE["International Paper"] = "IP"
+SCANNER_UNIVERSE["IQVIA"] = "IQV"
+SCANNER_UNIVERSE["Ingersoll Rand"] = "IR"
+SCANNER_UNIVERSE["Iron Mountain"] = "IRM"
+SCANNER_UNIVERSE["Intuitive Surgical"] = "ISRG"
+SCANNER_UNIVERSE["Gartner"] = "IT"
+SCANNER_UNIVERSE["Illinois Tool Works"] = "ITW"
+SCANNER_UNIVERSE["Invesco"] = "IVZ"
+SCANNER_UNIVERSE["Jacobs Solutions"] = "J"
+SCANNER_UNIVERSE["J.B. Hunt"] = "JBHT"
+SCANNER_UNIVERSE["Jabil"] = "JBL"
+SCANNER_UNIVERSE["Johnson Controls"] = "JCI"
+SCANNER_UNIVERSE["Jack Henry & Associates"] = "JKHY"
+SCANNER_UNIVERSE["Johnson & Johnson"] = "JNJ"
+SCANNER_UNIVERSE["JPMorgan Chase"] = "JPM"
+SCANNER_UNIVERSE["Keurig Dr Pepper"] = "KDP"
+SCANNER_UNIVERSE["KeyCorp"] = "KEY"
+SCANNER_UNIVERSE["Keysight Technologies"] = "KEYS"
+SCANNER_UNIVERSE["Kraft Heinz"] = "KHC"
+SCANNER_UNIVERSE["Kimco Realty"] = "KIM"
+SCANNER_UNIVERSE["KKR & Co."] = "KKR"
+SCANNER_UNIVERSE["KLA Corporation"] = "KLAC"
+SCANNER_UNIVERSE["Kimberly-Clark"] = "KMB"
+SCANNER_UNIVERSE["Kinder Morgan"] = "KMI"
+SCANNER_UNIVERSE["Coca-Cola Company (The)"] = "KO"
+SCANNER_UNIVERSE["Kroger"] = "KR"
+SCANNER_UNIVERSE["Kenvue"] = "KVUE"
+SCANNER_UNIVERSE["Loews Corporation"] = "L"
+SCANNER_UNIVERSE["Leidos"] = "LDOS"
+SCANNER_UNIVERSE["Lennar"] = "LEN"
+SCANNER_UNIVERSE["Labcorp"] = "LH"
+SCANNER_UNIVERSE["L3Harris"] = "LHX"
+SCANNER_UNIVERSE["Lennox International"] = "LII"
+SCANNER_UNIVERSE["Linde plc"] = "LIN"
+SCANNER_UNIVERSE["Lumentum"] = "LITE"
+SCANNER_UNIVERSE["Lilly (Eli)"] = "LLY"
+SCANNER_UNIVERSE["Lockheed Martin"] = "LMT"
+SCANNER_UNIVERSE["Alliant Energy"] = "LNT"
+SCANNER_UNIVERSE["Lowe's"] = "LOW"
+SCANNER_UNIVERSE["Lam Research"] = "LRCX"
+SCANNER_UNIVERSE["Lululemon Athletica"] = "LULU"
+SCANNER_UNIVERSE["Southwest Airlines"] = "LUV"
+SCANNER_UNIVERSE["Las Vegas Sands"] = "LVS"
+SCANNER_UNIVERSE["LyondellBasell"] = "LYB"
+SCANNER_UNIVERSE["Live Nation Entertainment"] = "LYV"
+SCANNER_UNIVERSE["Mastercard"] = "MA"
+SCANNER_UNIVERSE["Mid-America Apartment Communities"] = "MAA"
+SCANNER_UNIVERSE["Marriott International"] = "MAR"
+SCANNER_UNIVERSE["Masco"] = "MAS"
+SCANNER_UNIVERSE["McDonald's"] = "MCD"
+SCANNER_UNIVERSE["Microchip Technology"] = "MCHP"
+SCANNER_UNIVERSE["McKesson Corporation"] = "MCK"
+SCANNER_UNIVERSE["Moody's Corporation"] = "MCO"
+SCANNER_UNIVERSE["Mondelez International"] = "MDLZ"
+SCANNER_UNIVERSE["Medtronic"] = "MDT"
+SCANNER_UNIVERSE["MetLife"] = "MET"
+SCANNER_UNIVERSE["Meta Platforms"] = "META"
+SCANNER_UNIVERSE["MGM Resorts"] = "MGM"
+SCANNER_UNIVERSE["McCormick & Company"] = "MKC"
+SCANNER_UNIVERSE["Martin Marietta Materials"] = "MLM"
+SCANNER_UNIVERSE["3M"] = "MMM"
+SCANNER_UNIVERSE["Monster Beverage"] = "MNST"
+SCANNER_UNIVERSE["Altria"] = "MO"
+SCANNER_UNIVERSE["Mosaic Company (The)"] = "MOS"
+SCANNER_UNIVERSE["Marathon Petroleum"] = "MPC"
+SCANNER_UNIVERSE["Monolithic Power Systems"] = "MPWR"
+SCANNER_UNIVERSE["Merck & Co."] = "MRK"
+SCANNER_UNIVERSE["Moderna"] = "MRNA"
+SCANNER_UNIVERSE["Marsh McLennan"] = "MRSH"
+SCANNER_UNIVERSE["Marvell Technology"] = "MRVL"
+SCANNER_UNIVERSE["Morgan Stanley"] = "MS"
+SCANNER_UNIVERSE["MSCI Inc."] = "MSCI"
+SCANNER_UNIVERSE["Microsoft"] = "MSFT"
+SCANNER_UNIVERSE["Motorola Solutions"] = "MSI"
+SCANNER_UNIVERSE["M&T Bank"] = "MTB"
+SCANNER_UNIVERSE["Mettler Toledo"] = "MTD"
+SCANNER_UNIVERSE["Micron Technology"] = "MU"
+SCANNER_UNIVERSE["Norwegian Cruise Line Holdings"] = "NCLH"
+SCANNER_UNIVERSE["Nasdaq, Inc."] = "NDAQ"
+SCANNER_UNIVERSE["Nordson Corporation"] = "NDSN"
+SCANNER_UNIVERSE["NextEra Energy"] = "NEE"
+SCANNER_UNIVERSE["Newmont"] = "NEM"
+SCANNER_UNIVERSE["Netflix"] = "NFLX"
+SCANNER_UNIVERSE["NiSource"] = "NI"
+SCANNER_UNIVERSE["Nike, Inc."] = "NKE"
+SCANNER_UNIVERSE["Northrop Grumman"] = "NOC"
+SCANNER_UNIVERSE["ServiceNow"] = "NOW"
+SCANNER_UNIVERSE["NRG Energy"] = "NRG"
+SCANNER_UNIVERSE["Norfolk Southern"] = "NSC"
+SCANNER_UNIVERSE["NetApp"] = "NTAP"
+SCANNER_UNIVERSE["Northern Trust"] = "NTRS"
+SCANNER_UNIVERSE["Nucor"] = "NUE"
+SCANNER_UNIVERSE["Nvidia"] = "NVDA"
+SCANNER_UNIVERSE["NVR, Inc."] = "NVR"
+SCANNER_UNIVERSE["News Corp (Class B)"] = "NWS"
+SCANNER_UNIVERSE["News Corp (Class A)"] = "NWSA"
+SCANNER_UNIVERSE["NXP Semiconductors"] = "NXPI"
+SCANNER_UNIVERSE["Realty Income"] = "O"
+SCANNER_UNIVERSE["Old Dominion"] = "ODFL"
+SCANNER_UNIVERSE["Oneok"] = "OKE"
+SCANNER_UNIVERSE["Omnicom Group"] = "OMC"
+SCANNER_UNIVERSE["ON Semiconductor"] = "ON"
+SCANNER_UNIVERSE["Oracle Corporation"] = "ORCL"
+SCANNER_UNIVERSE["O'Reilly Automotive"] = "ORLY"
+SCANNER_UNIVERSE["Otis Worldwide"] = "OTIS"
+SCANNER_UNIVERSE["Occidental Petroleum"] = "OXY"
+SCANNER_UNIVERSE["Palo Alto Networks"] = "PANW"
+SCANNER_UNIVERSE["Paychex"] = "PAYX"
+SCANNER_UNIVERSE["Paccar"] = "PCAR"
+SCANNER_UNIVERSE["PG&E Corporation"] = "PCG"
+SCANNER_UNIVERSE["Public Service Enterprise Group"] = "PEG"
+SCANNER_UNIVERSE["PepsiCo"] = "PEP"
+SCANNER_UNIVERSE["Pfizer"] = "PFE"
+SCANNER_UNIVERSE["Principal Financial Group"] = "PFG"
+SCANNER_UNIVERSE["Procter & Gamble"] = "PG"
+SCANNER_UNIVERSE["Progressive Corporation"] = "PGR"
+SCANNER_UNIVERSE["Parker Hannifin"] = "PH"
+SCANNER_UNIVERSE["PulteGroup"] = "PHM"
+SCANNER_UNIVERSE["Packaging Corporation of America"] = "PKG"
+SCANNER_UNIVERSE["Prologis"] = "PLD"
+SCANNER_UNIVERSE["Palantir Technologies"] = "PLTR"
+SCANNER_UNIVERSE["Philip Morris International"] = "PM"
+SCANNER_UNIVERSE["PNC Financial Services"] = "PNC"
+SCANNER_UNIVERSE["Pentair"] = "PNR"
+SCANNER_UNIVERSE["Pinnacle West Capital"] = "PNW"
+SCANNER_UNIVERSE["Insulet Corporation"] = "PODD"
+SCANNER_UNIVERSE["PPG Industries"] = "PPG"
+SCANNER_UNIVERSE["PPL Corporation"] = "PPL"
+SCANNER_UNIVERSE["Prudential Financial"] = "PRU"
+SCANNER_UNIVERSE["Public Storage"] = "PSA"
+SCANNER_UNIVERSE["Paramount Skydance Corporation"] = "PSKY"
+SCANNER_UNIVERSE["Phillips 66"] = "PSX"
+SCANNER_UNIVERSE["PTC Inc."] = "PTC"
+SCANNER_UNIVERSE["Quanta Services"] = "PWR"
+SCANNER_UNIVERSE["PayPal"] = "PYPL"
+SCANNER_UNIVERSE["Qualcomm"] = "QCOM"
+SCANNER_UNIVERSE["Royal Caribbean Group"] = "RCL"
+SCANNER_UNIVERSE["Regency Centers"] = "REG"
+SCANNER_UNIVERSE["Regeneron Pharmaceuticals"] = "REGN"
+SCANNER_UNIVERSE["Regions Financial Corporation"] = "RF"
+SCANNER_UNIVERSE["Raymond James Financial"] = "RJF"
+SCANNER_UNIVERSE["Ralph Lauren Corporation"] = "RL"
+SCANNER_UNIVERSE["ResMed"] = "RMD"
+SCANNER_UNIVERSE["Rockwell Automation"] = "ROK"
+SCANNER_UNIVERSE["Rollins, Inc."] = "ROL"
+SCANNER_UNIVERSE["Roper Technologies"] = "ROP"
+SCANNER_UNIVERSE["Ross Stores"] = "ROST"
+SCANNER_UNIVERSE["Republic Services"] = "RSG"
+SCANNER_UNIVERSE["RTX Corporation"] = "RTX"
+SCANNER_UNIVERSE["Revvity"] = "RVTY"
+SCANNER_UNIVERSE["SBA Communications"] = "SBAC"
+SCANNER_UNIVERSE["Starbucks"] = "SBUX"
+SCANNER_UNIVERSE["Charles Schwab Corporation"] = "SCHW"
+SCANNER_UNIVERSE["Sherwin-Williams"] = "SHW"
+SCANNER_UNIVERSE["J.M. Smucker Company (The)"] = "SJM"
+SCANNER_UNIVERSE["Schlumberger"] = "SLB"
+SCANNER_UNIVERSE["Supermicro"] = "SMCI"
+SCANNER_UNIVERSE["Snap-on"] = "SNA"
+SCANNER_UNIVERSE["Sandisk"] = "SNDK"
+SCANNER_UNIVERSE["Synopsys"] = "SNPS"
+SCANNER_UNIVERSE["Southern Company"] = "SO"
+SCANNER_UNIVERSE["Solventum"] = "SOLV"
+SCANNER_UNIVERSE["Simon Property Group"] = "SPG"
+SCANNER_UNIVERSE["S&P Global"] = "SPGI"
+SCANNER_UNIVERSE["Sempra"] = "SRE"
+SCANNER_UNIVERSE["Steris"] = "STE"
+SCANNER_UNIVERSE["Steel Dynamics"] = "STLD"
+SCANNER_UNIVERSE["State Street Corporation"] = "STT"
+SCANNER_UNIVERSE["Seagate Technology"] = "STX"
+SCANNER_UNIVERSE["Constellation Brands"] = "STZ"
+SCANNER_UNIVERSE["Smurfit Westrock"] = "SW"
+SCANNER_UNIVERSE["Stanley Black & Decker"] = "SWK"
+SCANNER_UNIVERSE["Skyworks Solutions"] = "SWKS"
+SCANNER_UNIVERSE["Synchrony Financial"] = "SYF"
+SCANNER_UNIVERSE["Stryker Corporation"] = "SYK"
+SCANNER_UNIVERSE["Sysco"] = "SYY"
+SCANNER_UNIVERSE["AT&T"] = "T"
+SCANNER_UNIVERSE["Molson Coors Beverage Company"] = "TAP"
+SCANNER_UNIVERSE["TransDigm Group"] = "TDG"
+SCANNER_UNIVERSE["Teledyne Technologies"] = "TDY"
+SCANNER_UNIVERSE["Bio-Techne"] = "TECH"
+SCANNER_UNIVERSE["TE Connectivity"] = "TEL"
+SCANNER_UNIVERSE["Teradyne"] = "TER"
+SCANNER_UNIVERSE["Truist Financial"] = "TFC"
+SCANNER_UNIVERSE["Target Corporation"] = "TGT"
+SCANNER_UNIVERSE["TJX Companies"] = "TJX"
+SCANNER_UNIVERSE["TKO Group Holdings"] = "TKO"
+SCANNER_UNIVERSE["Thermo Fisher Scientific"] = "TMO"
+SCANNER_UNIVERSE["T-Mobile US"] = "TMUS"
+SCANNER_UNIVERSE["Texas Pacific Land Corporation"] = "TPL"
+SCANNER_UNIVERSE["Tapestry, Inc."] = "TPR"
+SCANNER_UNIVERSE["Targa Resources"] = "TRGP"
+SCANNER_UNIVERSE["Trimble Inc."] = "TRMB"
+SCANNER_UNIVERSE["T. Rowe Price"] = "TROW"
+SCANNER_UNIVERSE["Travelers Companies (The)"] = "TRV"
+SCANNER_UNIVERSE["Tractor Supply"] = "TSCO"
+SCANNER_UNIVERSE["Tesla, Inc."] = "TSLA"
+SCANNER_UNIVERSE["Tyson Foods"] = "TSN"
+SCANNER_UNIVERSE["Trane Technologies"] = "TT"
+SCANNER_UNIVERSE["Trade Desk (The)"] = "TTD"
+SCANNER_UNIVERSE["Take-Two Interactive"] = "TTWO"
+SCANNER_UNIVERSE["Texas Instruments"] = "TXN"
+SCANNER_UNIVERSE["Textron"] = "TXT"
+SCANNER_UNIVERSE["Tyler Technologies"] = "TYL"
+SCANNER_UNIVERSE["United Airlines Holdings"] = "UAL"
+SCANNER_UNIVERSE["Uber"] = "UBER"
+SCANNER_UNIVERSE["UDR, Inc."] = "UDR"
+SCANNER_UNIVERSE["Universal Health Services"] = "UHS"
+SCANNER_UNIVERSE["Ulta Beauty"] = "ULTA"
+SCANNER_UNIVERSE["UnitedHealth Group"] = "UNH"
+SCANNER_UNIVERSE["Union Pacific Corporation"] = "UNP"
+SCANNER_UNIVERSE["United Parcel Service"] = "UPS"
+SCANNER_UNIVERSE["United Rentals"] = "URI"
+SCANNER_UNIVERSE["U.S. Bancorp"] = "USB"
+SCANNER_UNIVERSE["Visa Inc."] = "V"
+SCANNER_UNIVERSE["Veeva Systems"] = "VEEV"
+SCANNER_UNIVERSE["Vici Properties"] = "VICI"
+SCANNER_UNIVERSE["Valero Energy"] = "VLO"
+SCANNER_UNIVERSE["Veralto"] = "VLTO"
+SCANNER_UNIVERSE["Vulcan Materials Company"] = "VMC"
+SCANNER_UNIVERSE["Verisk Analytics"] = "VRSK"
+SCANNER_UNIVERSE["Verisign"] = "VRSN"
+SCANNER_UNIVERSE["Vertiv"] = "VRT"
+SCANNER_UNIVERSE["Vertex Pharmaceuticals"] = "VRTX"
+SCANNER_UNIVERSE["Vistra Corp."] = "VST"
+SCANNER_UNIVERSE["Ventas"] = "VTR"
+SCANNER_UNIVERSE["Viatris"] = "VTRS"
+SCANNER_UNIVERSE["Verizon"] = "VZ"
+SCANNER_UNIVERSE["Wabtec"] = "WAB"
+SCANNER_UNIVERSE["Waters Corporation"] = "WAT"
+SCANNER_UNIVERSE["Warner Bros. Discovery"] = "WBD"
+SCANNER_UNIVERSE["Workday, Inc."] = "WDAY"
+SCANNER_UNIVERSE["Western Digital"] = "WDC"
+SCANNER_UNIVERSE["WEC Energy Group"] = "WEC"
+SCANNER_UNIVERSE["Welltower"] = "WELL"
+SCANNER_UNIVERSE["Wells Fargo"] = "WFC"
+SCANNER_UNIVERSE["Waste Management"] = "WM"
+SCANNER_UNIVERSE["Williams Companies"] = "WMB"
+SCANNER_UNIVERSE["Walmart"] = "WMT"
+SCANNER_UNIVERSE["W. R. Berkley Corporation"] = "WRB"
+SCANNER_UNIVERSE["Williams-Sonoma, Inc."] = "WSM"
+SCANNER_UNIVERSE["West Pharmaceutical Services"] = "WST"
+SCANNER_UNIVERSE["Willis Towers Watson"] = "WTW"
+SCANNER_UNIVERSE["Weyerhaeuser"] = "WY"
+SCANNER_UNIVERSE["Wynn Resorts"] = "WYNN"
+SCANNER_UNIVERSE["Xcel Energy"] = "XEL"
+SCANNER_UNIVERSE["ExxonMobil"] = "XOM"
+SCANNER_UNIVERSE["Xylem Inc."] = "XYL"
+SCANNER_UNIVERSE["Block, Inc."] = "XYZ"
+SCANNER_UNIVERSE["Yum! Brands"] = "YUM"
+SCANNER_UNIVERSE["Zimmer Biomet"] = "ZBH"
+SCANNER_UNIVERSE["Zebra Technologies"] = "ZBRA"
+SCANNER_UNIVERSE["Zoetis"] = "ZTS"
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
@@ -2454,6 +3042,184 @@ def render_live_paper_trading():
         elif price is not None:
             st.caption("Noch keine Order. Der Bot wartet auf ein Long-Signal nach seiner EMA-/RSI-Regel.")
 
+# ------------------------------------------------------------
+# Live-Scan über das gesamte Universum: stärkste Long-/Short-Muster
+# ------------------------------------------------------------
+def batch_load_ohlc(tickers: list[str], interval_key: str) -> dict[str, pd.DataFrame]:
+    """Lädt mehrere Ticker in einem yfinance-Aufruf statt einzeln (deutlich schneller)."""
+    cfg = INTERVAL_CONFIG[interval_key]
+    result: dict[str, pd.DataFrame] = {}
+    if not tickers:
+        return result
+    try:
+        raw = yf.download(
+            tickers=tickers, period=cfg["period"], interval=cfg["yf_interval"],
+            group_by="ticker", threads=True, progress=False,
+        )
+    except Exception:
+        return result
+    if raw is None or raw.empty:
+        return result
+    is_multi = isinstance(raw.columns, pd.MultiIndex)
+    for ticker in tickers:
+        try:
+            if is_multi:
+                if ticker not in raw.columns.get_level_values(0):
+                    continue
+                df = raw[ticker].copy()
+            else:
+                df = raw.copy()
+            df = df.dropna(how="all")
+            if df.empty:
+                continue
+            if cfg["resample"]:
+                df = df.resample(cfg["resample"]).agg({
+                    "Open": "first", "High": "max", "Low": "min",
+                    "Close": "last", "Volume": "sum",
+                }).dropna()
+            df = df.dropna()
+            if len(df) < 60:
+                continue
+            df = df.tail(1000).reset_index()
+            date_col = df.columns[0]
+            df = df.rename(columns={date_col: "Date"})
+            result[ticker] = df
+        except Exception:
+            continue
+    return result
+
+def scan_extreme_patterns(
+    universe: dict[str, str], interval_key: str, scan_limit: int,
+    bullish_threshold: float = 70.0, bearish_threshold: float = 30.0,
+    min_hits: int = 15, chunk_size: int = 60,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Scannt ein Asset-Universum nach Kerzenmustern mit historisch sehr klarer
+    Richtung. Bullisch = Muster trat historisch in min_hits Fällen auf und
+    führte in >= bullish_threshold % der Fälle zu einem höheren Folgekurs.
+    Bärisch entsprechend <= bearish_threshold %. Keine Anlageberatung.
+    """
+    items = list(universe.items())[:scan_limit]
+    label_by_ticker = {ticker: label for label, ticker in items}
+    tickers = [ticker for _, ticker in items]
+
+    bullish_rows: list[dict] = []
+    bearish_rows: list[dict] = []
+
+    for start in range(0, len(tickers), chunk_size):
+        chunk = tickers[start:start + chunk_size]
+        data_map = batch_load_ohlc(chunk, interval_key)
+        for ticker, df in data_map.items():
+            try:
+                patterns_list = detect_pattern(df)
+                last_close = float(df.iloc[-1]["Close"])
+                for pattern in patterns_list:
+                    if pattern not in PATTERNS:
+                        continue
+                    probability, hits = historical_probability(df, pattern)
+                    if probability is None or hits < min_hits:
+                        continue
+                    row = {
+                        "Asset": label_by_ticker.get(ticker, ticker),
+                        "Ticker": ticker,
+                        "Muster": pattern,
+                        "Trefferquote %": probability,
+                        "Vergleichsfälle": hits,
+                        "Letzter Kurs": round(last_close, 4),
+                    }
+                    if probability >= bullish_threshold:
+                        bullish_rows.append(row)
+                    elif probability <= bearish_threshold:
+                        bearish_rows.append(row)
+            except Exception:
+                continue
+
+    bullish_df = (
+        pd.DataFrame(bullish_rows).sort_values(["Trefferquote %", "Vergleichsfälle"], ascending=[False, False])
+        if bullish_rows else pd.DataFrame()
+    )
+    bearish_df = (
+        pd.DataFrame(bearish_rows).sort_values(["Trefferquote %", "Vergleichsfälle"], ascending=[True, False])
+        if bearish_rows else pd.DataFrame()
+    )
+    return bullish_df, bearish_df
+
+def _run_and_store_extreme_scan(interval_key: str, limit: int) -> None:
+    bullish_df, bearish_df = scan_extreme_patterns(SCANNER_UNIVERSE, interval_key, limit)
+    st.session_state.extreme_bullish = bullish_df
+    st.session_state.extreme_bearish = bearish_df
+    st.session_state.extreme_scanned_at = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y %H:%M:%S")
+
+_HAS_FRAGMENT = hasattr(st, "fragment")
+if _HAS_FRAGMENT:
+    @st.fragment(run_every=300)
+    def _extreme_scan_autorefresh_fragment():
+        interval_key = st.session_state.get("extreme_interval", "1d")
+        limit = st.session_state.get("extreme_limit", 120)
+        with st.spinner(f"Automatischer Scan über {limit} Assets läuft..."):
+            _run_and_store_extreme_scan(interval_key, limit)
+        st.caption(f"Zuletzt automatisch aktualisiert: {st.session_state.extreme_scanned_at} Uhr (alle 5 Minuten, nur solange dieser Tab offen ist)")
+
+def render_extreme_pattern_scanner():
+    with st.expander("Live-Scan: stärkste Long- & Short-Muster (S&P 500 + Top-Kryptos)", expanded=False):
+        st.caption(
+            f"Durchsucht bis zu {len(SCANNER_UNIVERSE)} der bekanntesten Aktien (alle aktuellen S&P-500-Mitglieder) "
+            "und größten Kryptowährungen nach Kerzenmustern mit historisch sehr eindeutiger Richtung. "
+            "Kein echter Live-Tick-Feed: Basis sind abgeschlossene Kerzen von Yahoo Finance, die periodisch neu geladen werden."
+        )
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            extreme_interval = st.selectbox("Intervall", ["1h", "1d"], index=1, key="extreme_interval")
+        with col_b:
+            extreme_limit = st.slider(
+                "Anzahl gescannter Assets", min_value=20, max_value=len(SCANNER_UNIVERSE),
+                value=min(120, len(SCANNER_UNIVERSE)), step=10, key="extreme_limit",
+            )
+        with col_c:
+            auto_refresh = st.checkbox(
+                "Alle 5 Min. automatisch aktualisieren (nur bei offenem Tab)",
+                value=False, key="extreme_autorefresh",
+                disabled=not _HAS_FRAGMENT,
+            )
+        st.caption(
+            f"Ein manueller Scan über {extreme_limit} Assets dauert grob "
+            f"{max(1, extreme_limit // 100)}–{max(2, extreme_limit // 40)} Minute(n), abhängig von Yahoo Finance. "
+            "Für ständige Überwachung aller ~600 Assets in echter Echtzeit bräuchte es einen bezahlten Marktdaten-Feed "
+            "und einen dauerhaft laufenden Server statt einer kostenlosen Streamlit-App."
+        )
+        if not _HAS_FRAGMENT:
+            st.caption("Hinweis: Automatische Aktualisierung benötigt Streamlit ≥ 1.37 (aktuell nicht verfügbar). Bitte manuell scannen.")
+
+        if auto_refresh and _HAS_FRAGMENT:
+            _extreme_scan_autorefresh_fragment()
+        elif st.button("Jetzt scannen", key="run_extreme_scan"):
+            with st.spinner(f"Scanne {extreme_limit} Assets..."):
+                _run_and_store_extreme_scan(extreme_interval, extreme_limit)
+
+        scanned_at = st.session_state.get("extreme_scanned_at")
+        if scanned_at:
+            st.caption(f"Letzter Scan: {scanned_at} Uhr")
+
+        bullish_df = st.session_state.get("extreme_bullish")
+        bearish_df = st.session_state.get("extreme_bearish")
+
+        st.markdown("**📈 Stärkste Long-Signale (historisch sehr häufig danach gestiegen)**")
+        if bullish_df is not None and not bullish_df.empty:
+            st.dataframe(bullish_df.head(15), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Noch kein Scan oder aktuell kein Asset mit ≥70% historischer Trefferquote bei mind. 15 Vergleichsfällen.")
+
+        st.markdown("**📉 Stärkste Short-Signale (historisch sehr häufig danach gefallen)**")
+        if bearish_df is not None and not bearish_df.empty:
+            st.dataframe(bearish_df.head(15), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Noch kein Scan oder aktuell kein Asset mit ≤30% historischer Trefferquote bei mind. 15 Vergleichsfällen.")
+
+        st.caption(
+            "Keine Anlageberatung. Eine hohe historische Trefferquote ist keine Garantie für die Zukunft — "
+            "Stichprobengröße, veränderte Marktbedingungen, Gebühren und Slippage sind hier nicht eingepreist."
+        )
+
 def render_market_scanner_paper_bot():
     with st.expander("Markt-Scanner · gemeinsamer Demo-Bot", expanded=False):
         st.caption("Ein gemeinsames, in Supabase gespeichertes Paper-Konto. Der Scanner bewertet liquide Aktien, ETFs und Krypto und eröffnet höchstens eine Long-Position. Keine echten Orders.")
@@ -2505,6 +3271,7 @@ def render_market_scanner_paper_bot():
             st.warning("Chart konnte gerade nicht geladen werden.")
 
 render_market_scanner_paper_bot()
+render_extreme_pattern_scanner()
 render_ml_predictor()
 
 # ------------------------------------------------------------
