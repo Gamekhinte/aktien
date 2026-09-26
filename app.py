@@ -23,8 +23,6 @@ import io
 import os
 import json
 import itertools
-import base64
-import pickle
 import hashlib
 import urllib.request
 import urllib.error
@@ -53,29 +51,10 @@ except ImportError:
 # ------------------------------------------------------------
 # Persistentes gemeinsames Lernsystem (Supabase)
 # ------------------------------------------------------------
-LEARNING_FEATURE_VERSION = "v3"
+LEARNING_FEATURE_VERSION = "v1"
 AUTO_TRAIN_MIN_NEW_EXAMPLES = 100
 MODEL_ALGORITHM = "GradientBoostingClassifier"
-
-# Single source of truth for which features the model sees and how the
-# label is constructed. Both build_ml_features() (used when saving examples)
-# and train_and_maybe_promote_shared_model() (used when training) import
-# these from here, so they can no longer silently drift apart like before.
-ML_FEATURE_COLS = [
-    "rsi", "macd_hist_norm", "bb_pos", "ema_gap",
-    "ret_1", "ret_5", "ret_10", "vol_ratio", "body_ratio",
-    "atr_norm", "trend_strength",
-]
-ML_LABEL_ATR_MULT = 1.5       # Stop-Distanz = ATR * dieser Faktor
-ML_LABEL_REWARD_RISK = 2.0    # Zielgewinn = Stop-Distanz * dieser Faktor
-ML_LABEL_MAX_HORIZON = 10     # Max. Kerzen, die auf ein Stop/Ziel-Ereignis gewartet wird
-ML_COST_R_PER_TRADE = 0.10    # Angenommene Kosten (Fees+Slippage) in Risiko-Einheiten (R) pro Trade
-
-def asset_class_for_symbol(symbol: str) -> str:
-    """Grobe, aber wirksame Trennung: Krypto- und Aktienkurse verhalten sich
-    fundamental unterschiedlich (24/7 vs. Handelszeiten, Volatilitätsregime).
-    Ein einziges gemeinsames Modell für beide verwischt reale Muster."""
-    return "crypto" if str(symbol).upper().endswith("-USD") else "stock"
+TRAINING_MIN_SAMPLES = 200
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
@@ -83,10 +62,15 @@ def get_supabase_client():
         return None
     try:
         url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        key = (
+            st.secrets.get("SUPABASE_SECRET_KEY")
+            or os.getenv("SUPABASE_SECRET_KEY")
+            or st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+            or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        )
     except Exception:
         url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         return None
     try:
@@ -97,45 +81,17 @@ def get_supabase_client():
 def learning_db_ready() -> bool:
     return get_supabase_client() is not None
 
-def get_supabase_diagnosis() -> dict:
-    """Explains WHY the Supabase connection is or isn't working, instead of
-    just returning None like get_supabase_client() does."""
-    if not SUPABASE_PACKAGE_AVAILABLE:
-        return {"ok": False, "reason": "Das 'supabase'-Paket ist nicht installiert. Prüfe requirements.txt."}
-    try:
-        url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    except Exception:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    if not url:
-        return {"ok": False, "reason": "SUPABASE_URL fehlt in den Streamlit-Secrets."}
-    if not key:
-        return {"ok": False, "reason": "SUPABASE_SERVICE_ROLE_KEY fehlt in den Streamlit-Secrets."}
-    try:
-        client = create_client(url, key)
-    except Exception as exc:
-        return {"ok": False, "reason": f"create_client() ist fehlgeschlagen: {exc}"}
-    try:
-        client.table("learning_examples").select("id").limit(1).execute()
-    except Exception as exc:
-        return {"ok": False, "reason": f"Verbindung steht, aber Zugriff auf 'learning_examples' schlägt fehl: {exc}"}
-    return {"ok": True, "reason": "Verbindung und Tabellenzugriff funktionieren."}
-
 def _event_key(symbol: str, interval_key: str, timestamp) -> str:
     raw = f"{symbol}|{interval_key}|{LEARNING_FEATURE_VERSION}|{timestamp}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFrame, feature_cols: list[str]) -> tuple[int, list[str]]:
-    """Returns (inserted_count, error_messages). Never silently hides a
-    failed insert anymore - if 0 rows land in Supabase, you'll see why."""
+def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFrame, feature_cols: list[str]) -> int:
     client = get_supabase_client()
     if client is None:
-        return 0, ["Kein Supabase-Client verfügbar (Secrets fehlen oder Verbindung schlägt fehl)."]
+        return 0
     usable = feature_df.dropna(subset=feature_cols + ["target"]).copy()
     if usable.empty:
-        return 0, ["Nach Feature-Berechnung blieben 0 verwertbare Zeilen übrig (zu wenig Historie oder zu viele NaNs)."]
-    asset_class = asset_class_for_symbol(symbol)
+        return 0
     rows = []
     for idx, row in usable.iterrows():
         timestamp = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
@@ -144,7 +100,6 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
         rows.append({
             "symbol": symbol,
             "interval_key": interval_key,
-            "asset_class": asset_class,
             "feature_version": LEARNING_FEATURE_VERSION,
             "features": features,
             "target": int(row["target"]),
@@ -154,25 +109,17 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
             "event_key": _event_key(symbol, interval_key, timestamp),
         })
     inserted = 0
-    errors: list[str] = []
     for start in range(0, len(rows), 500):
         batch = rows[start:start + 500]
         try:
             result = client.table("learning_examples").upsert(batch, on_conflict="event_key").execute()
             inserted += len(result.data or [])
-        except Exception as exc:
-            # Ein einzelner fehlerhafter Batch soll das Training nicht komplett
-            # blockieren - aber der Fehler wird jetzt gesammelt statt versteckt.
-            errors.append(f"Batch {start}-{start + len(batch)}: {exc}")
+        except Exception:
+            # Ein einzelner fehlerhafter Batch soll das Training nicht komplett blockieren.
             continue
-    if inserted == 0 and not errors:
-        errors.append(
-            "0 neue Zeilen gespeichert - vermutlich existieren diese Kerzen (event_key) "
-            "schon in Supabase (z.B. weil du dasselbe Asset/Intervall vorher schon geklickt hast)."
-        )
-    return inserted, errors
+    return inserted
 
-def load_learning_examples(asset_class: str | None = None) -> pd.DataFrame:
+def load_learning_examples() -> pd.DataFrame:
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
@@ -180,14 +127,14 @@ def load_learning_examples(asset_class: str | None = None) -> pd.DataFrame:
     try:
         offset = 0
         while True:
-            query = (
+            result = (
                 client.table("learning_examples")
-                .select("features,target,symbol,interval_key,asset_class,created_at")
+                .select("features,target,symbol,interval_key,label_time,created_at")
                 .eq("feature_version", LEARNING_FEATURE_VERSION)
+                .order("created_at", desc=False)
+                .range(offset, offset + 999)
+                .execute()
             )
-            if asset_class:
-                query = query.eq("asset_class", asset_class)
-            result = query.order("created_at", desc=False).range(offset, offset + 999).execute()
             batch = result.data or []
             rows.extend(batch)
             if len(batch) < 1000:
@@ -205,28 +152,23 @@ def load_learning_examples(asset_class: str | None = None) -> pd.DataFrame:
         record["target"] = int(item["target"])
         record["symbol"] = item.get("symbol")
         record["interval_key"] = item.get("interval_key")
-        record["asset_class"] = item.get("asset_class")
+        # created_at says when a user uploaded a candle, not when the candle
+        # existed. Training by it would leak newer market data into earlier
+        # validation folds when users sync assets at different times.
+        record["label_time"] = item.get("label_time") or item.get("created_at")
         records.append(record)
-    return pd.DataFrame(records)
+    data = pd.DataFrame(records)
+    data["label_time"] = pd.to_datetime(data["label_time"], utc=True, errors="coerce")
+    return data.sort_values("label_time", kind="stable").reset_index(drop=True)
 
-def _serialize_model(model) -> str:
-    return base64.b64encode(pickle.dumps(model, protocol=pickle.HIGHEST_PROTOCOL)).decode("ascii")
-
-def _deserialize_model(payload: str):
-    return pickle.loads(base64.b64decode(payload.encode("ascii")))
-
-def get_learning_status(asset_class: str | None = None) -> dict:
+def get_learning_status() -> dict:
     client = get_supabase_client()
     if client is None:
         return {"ready": False, "examples": 0, "active_model": None, "last_training": None}
     try:
-        state_key = f"class:{asset_class}" if asset_class else "global"
-        state = client.table("learning_state").select("value").eq("key", state_key).maybe_single().execute().data
+        state = client.table("learning_state").select("value").eq("key", "global").maybe_single().execute().data
         value = (state or {}).get("value") or {}
-        count_query = client.table("learning_examples").select("id", count="exact").eq("feature_version", LEARNING_FEATURE_VERSION)
-        if asset_class:
-            count_query = count_query.eq("asset_class", asset_class)
-        count = count_query.execute().count or 0
+        count = client.table("learning_examples").select("id", count="exact").eq("feature_version", LEARNING_FEATURE_VERSION).execute().count or 0
         return {
             "ready": True,
             "examples": int(count),
@@ -236,20 +178,19 @@ def get_learning_status(asset_class: str | None = None) -> dict:
     except Exception:
         return {"ready": True, "examples": 0, "active_model": None, "last_training": None}
 
-def _set_learning_state(asset_class: str | None = None, **updates):
+def _set_learning_state(**updates):
     client = get_supabase_client()
     if client is None:
         return
-    state_key = f"class:{asset_class}" if asset_class else "global"
     try:
-        current = client.table("learning_state").select("value").eq("key", state_key).maybe_single().execute().data
+        current = client.table("learning_state").select("value").eq("key", "global").maybe_single().execute().data
         value = dict((current or {}).get("value") or {})
         value.update(updates)
-        client.table("learning_state").upsert({"key": state_key, "value": value}).execute()
+        client.table("learning_state").upsert({"key": "global", "value": value}).execute()
     except Exception:
         pass
 
-def _latest_promoted_model(asset_class: str):
+def _latest_promoted_model():
     client = get_supabase_client()
     if client is None:
         return None
@@ -258,7 +199,6 @@ def _latest_promoted_model(asset_class: str):
             client.table("model_versions")
             .select("*")
             .eq("promoted", True)
-            .eq("asset_class", asset_class)
             .order("created_at", desc=True)
             .limit(1)
             .execute()
@@ -267,26 +207,18 @@ def _latest_promoted_model(asset_class: str):
     except Exception:
         return None
 
-def _expectancy_r(win_rate: float, reward_risk: float = ML_LABEL_REWARD_RISK, cost_r: float = ML_COST_R_PER_TRADE) -> float:
-    """Erwartungswert pro Trade in R (Vielfachen des Stop-Risikos), nach
-    Abzug angenommener Kosten. win_rate * reward_risk ist der erwartete
-    Gewinn, (1-win_rate) der erwartete Verlust (1R), minus Kosten pro Trade.
-    Nur wenn das > 0 ist, verdient die Strategie im Mittel Geld - eine reine
-    Trefferquote über der Basisrate reicht dafür nicht automatisch aus."""
-    return win_rate * reward_risk - (1.0 - win_rate) - cost_r
-
-def train_and_maybe_promote_shared_model(asset_class: str) -> dict:
+def train_and_maybe_promote_shared_model() -> dict:
     if not SKLEARN_AVAILABLE:
         return {"error": "scikit-learn fehlt."}
     client = get_supabase_client()
     if client is None:
-        return {"error": "Supabase ist noch nicht verbunden. Hinterlege SUPABASE_URL und SUPABASE_SERVICE_ROLE_KEY in den Streamlit-Secrets."}
+        return {"error": "Supabase ist noch nicht verbunden. Hinterlege SUPABASE_URL und SUPABASE_SECRET_KEY in den Streamlit-Secrets."}
 
-    data = load_learning_examples(asset_class=asset_class)
-    feature_cols = ML_FEATURE_COLS
+    data = load_learning_examples()
+    feature_cols = ["rsi", "macd_hist", "bb_pos", "ema_gap", "ret_1", "ret_5", "ret_10", "vol_ratio", "body_ratio"]
     usable = data.dropna(subset=feature_cols + ["target"]).copy() if not data.empty else pd.DataFrame()
-    if len(usable) < 200:
-        return {"error": f"Noch zu wenig Trainingsdaten für '{asset_class}': {len(usable)}/200."}
+    if len(usable) < TRAINING_MIN_SAMPLES:
+        return {"error": f"Noch zu wenig gemeinsame Trainingsdaten: {len(usable)}/{TRAINING_MIN_SAMPLES}."}
 
     run = client.table("training_runs").insert({"status": "running", "sample_count": int(len(usable))}).execute()
     run_id = (run.data or [{}])[0].get("id")
@@ -294,7 +226,6 @@ def train_and_maybe_promote_shared_model(asset_class: str) -> dict:
         n_folds = 5
         fold_size = len(usable) // (n_folds + 1)
         fold_accuracies = []
-        fold_expectancies = []
         fold_details = []
         for fold in range(n_folds):
             train_end = fold_size * (fold + 1)
@@ -305,93 +236,61 @@ def train_and_maybe_promote_shared_model(asset_class: str) -> dict:
                 continue
             model = GradientBoostingClassifier(n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42)
             model.fit(train_slice[feature_cols], train_slice["target"])
-            preds = model.predict(test_slice[feature_cols])
-            accuracy = float((preds == test_slice["target"].values).mean())
-            # Erwartungswert nur über die Kerzen, in denen das Modell tatsächlich
-            # "long" gesagt hätte (preds==1) - das entspricht dem echten Handeln,
-            # nicht der reinen Klassifikations-Trefferquote über alle Kerzen.
-            longs = test_slice[preds == 1]
-            long_win_rate = float((longs["target"] == 1).mean()) if len(longs) else None
-            expectancy = _expectancy_r(long_win_rate) if long_win_rate is not None else None
+            accuracy = float((model.predict(test_slice[feature_cols]) == test_slice["target"].values).mean())
             fold_accuracies.append(accuracy)
-            if expectancy is not None:
-                fold_expectancies.append(expectancy)
-            fold_details.append({
-                "fold": fold + 1, "train_size": len(train_slice), "test_size": len(test_slice),
-                "accuracy": round(accuracy * 100, 1),
-                "long_signals": int(len(longs)),
-                "long_win_rate": round(long_win_rate * 100, 1) if long_win_rate is not None else None,
-                "expectancy_r": round(expectancy, 3) if expectancy is not None else None,
-            })
+            fold_details.append({"fold": fold + 1, "train_size": len(train_slice), "test_size": len(test_slice), "accuracy": round(accuracy * 100, 1)})
         if not fold_accuracies:
             raise RuntimeError("Keine gültigen Walk-Forward-Folds möglich.")
 
         new_accuracy = float(np.mean(fold_accuracies))
-        mean_expectancy = float(np.mean(fold_expectancies)) if fold_expectancies else None
-        baseline = float(usable["target"].mean())
+        positive_rate = float(usable["target"].mean())
+        # Accuracy is only meaningful if it beats the trivial majority-class
+        # predictor. For an imbalanced data set, "always up" can look good.
+        baseline = max(positive_rate, 1 - positive_rate)
         final_model = GradientBoostingClassifier(n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42)
         final_model.fit(usable[feature_cols], usable["target"])
         metrics = {
             "mean_accuracy": round(new_accuracy * 100, 2),
-            "mean_expectancy_r": round(mean_expectancy, 3) if mean_expectancy is not None else None,
-            "baseline_up_rate": round(baseline * 100, 2),
+            "baseline_accuracy": round(baseline * 100, 2),
+            "up_rate": round(positive_rate * 100, 2),
             "fold_details": fold_details,
             "sample_size": int(len(usable)),
-            "asset_class": asset_class,
             "feature_importances": dict(zip(feature_cols, final_model.feature_importances_.round(4))),
         }
-        previous = _latest_promoted_model(asset_class)
+        previous = _latest_promoted_model()
         previous_accuracy = None
-        previous_expectancy = None
         if previous:
-            prev_metrics = previous.get("validation_metrics") or {}
-            previous_accuracy = prev_metrics.get("mean_accuracy")
-            previous_expectancy = prev_metrics.get("mean_expectancy_r")
+            previous_accuracy = ((previous.get("validation_metrics") or {}).get("mean_accuracy"))
 
-        # Ein neues Modell wird nur aktiviert, wenn es:
-        #  1) nach Kosten im Mittel positiv erwartbar ist (expectancy_r > 0), UND
-        #  2) das bisher aktive Modell nicht verschlechtert.
-        # Reine Trefferquote über der Basisrate reicht NICHT mehr - ein Modell,
-        # das zwar "genauer als Münzwurf" ist, aber nach Fees/Slippage trotzdem
-        # verliert, wird jetzt bewusst verworfen statt live geschaltet.
-        has_positive_expectancy = mean_expectancy is not None and mean_expectancy > 0
-        not_worse_than_active = (
-            previous is None
-            or previous_expectancy is None
-            or mean_expectancy is None
-            or mean_expectancy >= float(previous_expectancy)
-        )
-        promote = has_positive_expectancy and not_worse_than_active
-        if not has_positive_expectancy:
-            rejection_reason = (
-                f"Erwartungswert nach Kosten {mean_expectancy:.3f}R <= 0 - "
-                f"Modell würde im Schnitt Geld verlieren, egal wie 'genau' es klingt."
-                if mean_expectancy is not None else
-                "Modell hat nie ein Long-Signal ausgegeben; Erwartungswert nicht bestimmbar."
-            )
-        else:
-            rejection_reason = f"Erwartungswert {mean_expectancy:.3f}R < aktives Modell {float(previous_expectancy):.3f}R"
-
+        # A candidate must beat a naive baseline and must not degrade the
+        # active model. This keeps noise from becoming the production model.
+        beats_baseline = new_accuracy >= baseline
+        promote = beats_baseline and (previous is None or previous_accuracy is None or new_accuracy * 100 >= float(previous_accuracy))
         model_row = {
             "training_run_id": run_id,
             "algorithm": MODEL_ALGORITHM,
             "feature_version": LEARNING_FEATURE_VERSION,
-            "asset_class": asset_class,
             "sample_count": int(len(usable)),
             "validation_metrics": metrics,
-            "model_artifact_base64": _serialize_model(final_model),
+            # Do not store pickle payloads in a database: loading an altered
+            # pickle can execute arbitrary code. The app only needs metrics
+            # and retrains from verified examples on demand.
+            "model_artifact_base64": None,
             "promoted": bool(promote),
-            "rejection_reason": None if promote else rejection_reason,
+            "rejection_reason": None if promote else (
+                f"Validation {new_accuracy*100:.2f}% did not beat baseline {baseline*100:.2f}%"
+                if not beats_baseline else f"Validation {new_accuracy*100:.2f}% < active {float(previous_accuracy):.2f}%"
+            ),
         }
         if promote and previous:
-            client.table("model_versions").update({"promoted": False}).eq("promoted", True).eq("asset_class", asset_class).execute()
+            client.table("model_versions").update({"promoted": False}).eq("promoted", True).execute()
         model_insert = client.table("model_versions").insert(model_row).execute()
         model_id = (model_insert.data or [{}])[0].get("id")
         now = datetime.now(ZoneInfo("UTC")).isoformat()
         client.table("training_runs").update({"status": "completed" if promote else "rejected", "finished_at": now, "metrics": metrics}).eq("id", run_id).execute()
         if promote:
-            _set_learning_state(asset_class, active_model_id=model_id, examples_seen=int(len(usable)), last_training_at=now, feature_version=LEARNING_FEATURE_VERSION)
-        return {"ok": True, "promoted": promote, "metrics": metrics, "previous_accuracy": previous_accuracy, "previous_expectancy": previous_expectancy, "model_id": model_id, "rejection_reason": None if promote else rejection_reason}
+            _set_learning_state(active_model_id=model_id, examples_seen=int(len(usable)), last_training_at=now, feature_version=LEARNING_FEATURE_VERSION)
+        return {"ok": True, "promoted": promote, "metrics": metrics, "previous_accuracy": previous_accuracy, "model_id": model_id}
     except Exception as exc:
         client.table("training_runs").update({"status": "failed", "finished_at": datetime.now(ZoneInfo("UTC")).isoformat(), "error_message": str(exc)}).eq("id", run_id).execute()
         return {"error": f"Training fehlgeschlagen: {exc}"}
@@ -822,7 +721,7 @@ with st.expander("Marktdatenquelle", expanded=False):
 # ------------------------------------------------------------
 # Daten laden
 # ------------------------------------------------------------
-def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance", period_override: str | None = None, max_candles: int = 1000) -> pd.DataFrame:
+def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> pd.DataFrame:
     if source == "Interactive Brokers Paper-Feed":
         feed = st.session_state.get("ibkr_feed")
         if feed is None or not feed.connected:
@@ -830,8 +729,7 @@ def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance", per
         return feed.fetch_bars(ticker, interval_key)
 
     cfg = INTERVAL_CONFIG[interval_key]
-    period = period_override or cfg["period"]
-    df = yf.download(ticker, period=period, interval=cfg["yf_interval"], progress=False)
+    df = yf.download(ticker, period=cfg["period"], interval=cfg["yf_interval"], progress=False)
 
     if df.empty:
         return df
@@ -846,8 +744,7 @@ def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance", per
         }).dropna()
 
     df = df.dropna()
-    if max_candles:
-        df = df.tail(max_candles)
+    df = df.tail(1000)
     df = df.reset_index()
     date_col = df.columns[0]
     df = df.rename(columns={date_col: "Date"})
@@ -1537,7 +1434,7 @@ def simulate_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
     }
 
 def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: float,
-                        min_trades: int = 8, min_holdout_trades: int = 3) -> dict:
+                        min_trades: int = 8) -> dict:
     """
     Grid-Search über EMA/RSI/ATR/Chance-Risiko-Kombinationen.
     Bewertet wird ausschließlich auf einem Out-of-Sample-Holdout-Zeitraum,
@@ -1571,7 +1468,7 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
             continue
 
         holdout_result = simulate_paper_bot(holdout_df, initial_capital, risk_percent, params)
-        if holdout_result["trade_count"] < min_holdout_trades:
+        if holdout_result["trade_count"] < 3:
             continue
 
         score = holdout_result["return_percent"]
@@ -1585,61 +1482,9 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
 # ------------------------------------------------------------
 ML_HORIZON = 5  # Kerzen in die Zukunft, deren Richtung vorhergesagt wird
 
-def _triple_barrier_labels(
-    close: np.ndarray, high: np.ndarray, low: np.ndarray, atr: np.ndarray,
-    atr_mult: float = ML_LABEL_ATR_MULT, reward_risk: float = ML_LABEL_REWARD_RISK,
-    max_horizon: int = ML_LABEL_MAX_HORIZON,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Statt "steigt der Kurs in N Kerzen über einen Schwellwert" simulieren wir
-    hier für jede Kerze i einen echten Long-Trade mit ATR-Stop und
-    Take-Profit im festen Reward:Risk-Verhältnis (wie im Paper-Bot) und
-    schauen, welche Barriere zuerst berührt wird:
-      - Take-Profit zuerst erreicht  -> target = 1 (Trade wäre profitabel)
-      - Stop zuerst erreicht          -> target = 0 (Trade wäre verloren)
-      - keine der beiden Barrieren
-        innerhalb von max_horizon
-        Kerzen erreicht               -> target = NaN (wird verworfen)
-    Das bringt das Lernziel näher an das, was beim echten Handeln zählt
-    (Trade-Ausgang), statt an eine willkürliche Richtungs-Schwelle.
-    """
-    n = len(close)
-    labels = np.full(n, np.nan)
-    realized_return = np.full(n, np.nan)
-    for i in range(n - 1):
-        a = atr[i]
-        if not np.isfinite(a) or a <= 0 or not np.isfinite(close[i]):
-            continue
-        entry = close[i]
-        stop_dist = a * atr_mult
-        target_dist = stop_dist * reward_risk
-        upper = entry + target_dist
-        lower = entry - stop_dist
-        end = min(i + 1 + max_horizon, n)
-        for j in range(i + 1, end):
-            hit_up = high[j] >= upper
-            hit_down = low[j] <= lower
-            if hit_up and hit_down:
-                # Beides in derselben Kerze berührt: keine Reihenfolge bekannt
-                # -> konservativ als Verlust werten, nicht als Zufallstreffer.
-                labels[i] = 0.0
-                realized_return[i] = -stop_dist / entry
-                break
-            if hit_up:
-                labels[i] = 1.0
-                realized_return[i] = target_dist / entry
-                break
-            if hit_down:
-                labels[i] = 0.0
-                realized_return[i] = -stop_dist / entry
-                break
-    return labels, realized_return
-
 def build_ml_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     data = df.copy()
     close = data["Close"]
-    high = data["High"]
-    low = data["Low"]
 
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -1652,11 +1497,6 @@ def build_ml_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     data["macd"] = ema12 - ema26
     data["macd_signal"] = data["macd"].ewm(span=9, adjust=False).mean()
     data["macd_hist"] = data["macd"] - data["macd_signal"]
-    # Normalized by price so the value is comparable across assets with very
-    # different nominal prices (e.g. BTC ~60000 vs AAPL ~200). Without this,
-    # a single shared model is skewed toward whichever asset has the largest
-    # raw price scale.
-    data["macd_hist_norm"] = data["macd_hist"] / close.replace(0, np.nan)
 
     sma20 = close.rolling(20).mean()
     std20 = close.rolling(20).std()
@@ -1677,28 +1517,19 @@ def build_ml_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     rng = (data["High"] - data["Low"]).replace(0, np.nan)
     data["body_ratio"] = body / rng
 
-    # --- Neu: Volatilitäts-Regime (ATR) ---
-    previous_close = close.shift(1)
-    true_range = pd.concat([
-        high - low, (high - previous_close).abs(), (low - previous_close).abs(),
-    ], axis=1).max(axis=1)
-    atr = true_range.rolling(14).mean()
-    data["atr"] = atr
-    data["atr_norm"] = atr / close.replace(0, np.nan)
-
-    # --- Neu: Trend-Regime (liegt der Kurs strukturell über/unter langfristigem Trend) ---
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
-    data["trend_strength"] = (sma50 - sma200) / close.replace(0, np.nan)
-
-    labels, realized = _triple_barrier_labels(
-        close.to_numpy(dtype=float), high.to_numpy(dtype=float),
-        low.to_numpy(dtype=float), atr.to_numpy(dtype=float),
+    future_return = close.shift(-ML_HORIZON) / close - 1
+    threshold = data["ret_1"].rolling(50).std().fillna(data["ret_1"].std()) * 1.0
+    data["future_return"] = future_return
+    data["target"] = np.where(
+        future_return > threshold, 1,
+        np.where(future_return < -threshold, 0, np.nan),
     )
-    data["future_return"] = realized
-    data["target"] = labels
 
-    return data, ML_FEATURE_COLS
+    feature_cols = [
+        "rsi", "macd_hist", "bb_pos", "ema_gap",
+        "ret_1", "ret_5", "ret_10", "vol_ratio", "body_ratio",
+    ]
+    return data, feature_cols
 
 def train_walkforward_ml(df: pd.DataFrame, n_folds: int = 5) -> dict:
     """
@@ -1770,12 +1601,17 @@ def train_walkforward_ml(df: pd.DataFrame, n_folds: int = 5) -> dict:
 def render_ml_predictor():
     with st.expander("KI-Prognose (gemeinsames lernendes Modell)", expanded=False):
         st.caption(
-            "Das Modell sammelt aus den Paper-Analysen gemeinsame Trainingsbeispiele in Supabase - "
-            "getrennt nach Krypto und Aktien, da beide sich zu unterschiedlich verhalten für ein "
-            "gemeinsames Modell. Das Label ist ein simulierter ATR-Stop/Ziel-Trade (2:1 Reward:Risk), "
-            "kein reiner Richtungs-Tipp. Neue Modelle werden nur übernommen, wenn ihr Erwartungswert "
-            "nach angenommenen Kosten positiv ist UND das aktive Modell nicht verschlechtert wird."
+            "Das Modell sammelt aus den Paper-Analysen gemeinsame Trainingsbeispiele in Supabase. "
+            "Neue Modelle werden per Walk-Forward validiert und nur übernommen, wenn sie das aktive Modell nicht verschlechtern."
         )
+        status = get_learning_status()
+        if not status["ready"]:
+            st.warning("Gemeinsames Lernen ist noch nicht verbunden. Setze die Supabase-Secrets, bevor du die Web-App veröffentlichst.")
+        else:
+            a, b, c = st.columns(3)
+            a.metric("Gemeinsame Beispiele", str(status["examples"]))
+            b.metric("Aktives Modell", "Ja" if status["active_model"] else "Noch keins")
+            c.metric("Letztes Training", str(status["last_training"] or "Noch keins")[:19])
 
         if not SKLEARN_AVAILABLE:
             st.warning("Für dieses Feature fehlt scikit-learn.")
@@ -1787,39 +1623,24 @@ def render_ml_predictor():
             "Intervall", list(INTERVAL_CONFIG.keys()),
             index=list(INTERVAL_CONFIG.keys()).index("1d"), key="ml_interval",
         )
-        ticker = ASSETS.get(ml_asset) or ml_asset
-        active_class = asset_class_for_symbol(ticker)
-        st.caption(f"Asset-Klasse für dieses Asset: **{active_class}** (eigenes Modell, getrennt von der anderen Klasse).")
 
-        status = get_learning_status(active_class)
-        if not status["ready"]:
-            diag = get_supabase_diagnosis()
-            st.warning(f"Gemeinsames Lernen ist noch nicht verbunden: {diag['reason']}")
-        else:
-            a, b, c = st.columns(3)
-            a.metric(f"Beispiele ({active_class})", str(status["examples"]))
-            b.metric("Aktives Modell", "Ja" if status["active_model"] else "Noch keins")
-            c.metric("Letztes Training", str(status["last_training"] or "Noch keins")[:19])
-
-        if st.button("Daten sammeln & Modell trainieren", key="run_ml"):
-            with st.spinner("Sammle Paper-Daten und prüfe das Modell..."):
+        if st.button("Daten sammeln & gemeinsames Modell trainieren", key="run_ml"):
+            ticker = ASSETS.get(ml_asset) or ml_asset
+            with st.spinner("Sammle Paper-Daten und prüfe das gemeinsame Modell..."):
                 try:
                     ml_df = load_data(ticker, ml_interval, "Yahoo Finance")
                     if ml_df.empty or len(ml_df) < 250:
                         st.error("Für sinnvolles Training werden mindestens 250 Kerzen benötigt.")
                     else:
                         feature_df, feature_cols = build_ml_features(ml_df)
-                        saved, save_errors = save_learning_examples(ticker, ml_interval, feature_df, feature_cols)
-                        st.info(f"{saved} Trainingsbeispiele aus {ticker} ({active_class}) wurden synchronisiert.")
-                        if save_errors:
-                            for msg in save_errors:
-                                st.warning(msg)
-                        status_after = get_learning_status(active_class)
-                        if status_after["examples"] >= 200:
-                            result = train_and_maybe_promote_shared_model(active_class)
+                        saved = save_learning_examples(ticker, ml_interval, feature_df, feature_cols)
+                        st.info(f"{saved} Trainingsbeispiele aus {ticker} wurden synchronisiert.")
+                        status_after = get_learning_status()
+                        if status_after["examples"] >= TRAINING_MIN_SAMPLES:
+                            result = train_and_maybe_promote_shared_model()
                             st.session_state.ml_result = result
                         else:
-                            st.session_state.ml_result = {"error": f"Noch {200 - status_after['examples']} Beispiele bis zum ersten Training für '{active_class}'."}
+                            st.session_state.ml_result = {"error": f"Noch {TRAINING_MIN_SAMPLES - status_after['examples']} Beispiele bis zum ersten gemeinsamen Training."}
                 except Exception as exc:
                     st.session_state.ml_result = {"error": str(exc)}
 
@@ -1831,17 +1652,10 @@ def render_ml_predictor():
                 metrics = result["metrics"]
                 metric_a, metric_b, metric_c = st.columns(3)
                 metric_a.metric("Walk-Forward-Trefferquote", f'{metrics["mean_accuracy"]}%')
-                expectancy = metrics.get("mean_expectancy_r")
-                metric_b.metric("Erwartungswert/Trade", f'{expectancy:.2f}R' if expectancy is not None else "n/a")
+                metric_b.metric("Naive Basislinie", f'{metrics["baseline_accuracy"]}%')
                 metric_c.metric("Modellstatus", "Übernommen" if result["promoted"] else "Verworfen")
-                if result.get("rejection_reason"):
-                    st.warning(result["rejection_reason"])
-                if result.get("previous_expectancy") is not None:
-                    st.caption(f'Vorheriges aktives Modell: {float(result["previous_expectancy"]):.3f}R Erwartungswert/Trade.')
-                st.caption(
-                    "Erwartungswert/Trade (R) = wie viele Vielfache des Stop-Risikos das Modell im Schnitt "
-                    "pro Long-Signal macht, nach Abzug angenommener Fees/Slippage. Nur > 0 ist grundsätzlich handelbar."
-                )
+                if result.get("previous_accuracy") is not None:
+                    st.caption(f'Vorheriges aktives Modell: {float(result["previous_accuracy"]):.2f}% Walk-Forward-Trefferquote.')
                 st.dataframe(pd.DataFrame(metrics["fold_details"]), use_container_width=True, hide_index=True)
                 importance_df = pd.DataFrame(
                     sorted(metrics["feature_importances"].items(), key=lambda kv: kv[1], reverse=True),
@@ -2333,25 +2147,10 @@ render_market_hours()
 
 def render_paper_bot():
     with st.expander("Paper-Bot trainieren", expanded=False):
-        st.caption(
-            "Das hier ist kein KI-Modell, sondern eine feste Regel (EMA-Kreuzung + RSI + ATR-Stop). "
-            "Die Regel lernt nichts - sie feuert einfach nur, wenn ihre Bedingung erfüllt ist. "
-            "Yahoo-Finance-Daten werden in Trainings- und Testabschnitt geteilt, es werden nur virtuelle Trades simuliert."
-        )
+        st.caption("Yahoo-Finance-Daten werden in Trainings- und Testabschnitt geteilt. Es werden nur virtuelle Trades simuliert.")
         bot_options = list(ASSETS.keys()) + st.session_state.watchlist
         bot_asset = st.selectbox("Bot-Asset", bot_options, key="bot_asset")
         bot_interval = st.selectbox("Bot-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="bot_interval")
-
-        history_options = {
-            "1 Jahr": "1y", "2 Jahre": "2y", "5 Jahre": "5y", "10 Jahre": "10y", "Maximal verfügbar": "max",
-        }
-        bot_history_label = st.selectbox(
-            "Wie viel Historie simulieren?", list(history_options.keys()),
-            index=2, key="bot_history",
-            help="Mehr Historie = mehr mögliche Trades, aber bei Intraday-Intervallen begrenzt Yahoo Finance die Verfügbarkeit ohnehin (z.B. 1m nur 7 Tage).",
-        )
-        bot_period_override = history_options[bot_history_label]
-
         bot_capital, bot_risk = st.columns(2)
         with bot_capital:
             bot_initial_capital = st.number_input("Startkapital (€)", min_value=100.0, value=1000.0, step=100.0, key="bot_capital")
@@ -2362,28 +2161,19 @@ def render_paper_bot():
             "Parameter automatisch optimieren (Grid-Search, out-of-sample getestet)",
             value=True, key="bot_optimize",
         )
-        bot_min_trades = st.number_input(
-            "Mind. Trades im Trainingsabschnitt, damit eine Parameter-Kombi zählt", min_value=1, max_value=100,
-            value=8, step=1, key="bot_min_trades",
-            help="Niedriger = mehr Kombinationen werden zugelassen, aber die Statistik pro Kombi wird unsicherer.",
-        )
-        bot_min_holdout_trades = st.number_input(
-            "Mind. Trades im Test-/Holdout-Abschnitt", min_value=1, max_value=50,
-            value=3, step=1, key="bot_min_holdout_trades",
-        )
 
         if st.button("Simulation starten", key="run_paper_bot"):
             ticker = ASSETS.get(bot_asset) or bot_asset
             with st.spinner("Historische Yahoo-Finance-Daten werden getestet..."):
-                bot_df = load_data(ticker, bot_interval, "Yahoo Finance", period_override=bot_period_override, max_candles=0)
+                bot_df = load_data(ticker, bot_interval, "Yahoo Finance")
                 if bot_df.empty or len(bot_df) < 150:
                     st.error("Für diese Simulation werden mindestens 150 Kerzen benötigt.")
                     st.session_state.paper_bot_result = None
                     st.session_state.paper_bot_best_params = None
                 elif auto_optimize:
-                    best = optimize_paper_bot(bot_df, bot_initial_capital, bot_risk_percent, min_trades=int(bot_min_trades), min_holdout_trades=int(bot_min_holdout_trades))
+                    best = optimize_paper_bot(bot_df, bot_initial_capital, bot_risk_percent)
                     if best is None:
-                        st.warning("Keine Parameter-Kombination hat genug Trades erzeugt. Versuch mehr Historie, ein anderes Intervall/Asset, oder senk die Mindest-Trades-Schwelle.")
+                        st.warning("Keine Parameter-Kombination hat genug Trades erzeugt. Versuch ein anderes Intervall/Asset oder deaktiviere die Optimierung.")
                         st.session_state.paper_bot_result = None
                         st.session_state.paper_bot_best_params = None
                     else:
