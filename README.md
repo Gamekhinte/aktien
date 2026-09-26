@@ -1,0 +1,9 @@
+[requirements.txt](https://github.com/user-attachments/files/32682150/requirements.txt)
+streamlit
+pandas
+numpy
+yfinance
+plotly
+scikit-learn
+google-genai
+supabase
