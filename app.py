@@ -55,6 +55,14 @@ LEARNING_FEATURE_VERSION = "v1"
 AUTO_TRAIN_MIN_NEW_EXAMPLES = 100
 MODEL_ALGORITHM = "GradientBoostingClassifier"
 TRAINING_MIN_SAMPLES = 200
+SCANNER_ACCOUNT_KEY = "shared_scanner_v1"
+SCANNER_UNIVERSE = {
+    "Bitcoin": "BTC-USD", "Ethereum": "ETH-USD", "Solana": "SOL-USD",
+    "Apple": "AAPL", "Microsoft": "MSFT", "NVIDIA": "NVDA", "Amazon": "AMZN",
+    "Alphabet": "GOOGL", "Meta": "META", "Tesla": "TSLA", "AMD": "AMD",
+    "Netflix": "NFLX", "Coinbase": "COIN", "Berkshire Hathaway": "BRK-B",
+    "S&P 500 ETF": "SPY", "Nasdaq 100 ETF": "QQQ", "Gold ETF": "GLD",
+}
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
@@ -112,12 +120,29 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
     for start in range(0, len(rows), 500):
         batch = rows[start:start + 500]
         try:
-            result = client.table("learning_examples").upsert(batch, on_conflict="event_key").execute()
-            inserted += len(result.data or [])
-        except Exception:
-            # Ein einzelner fehlerhafter Batch soll das Training nicht komplett blockieren.
-            continue
+            client.table("learning_examples").upsert(batch, on_conflict="event_key").execute()
+            # Supabase may return no row body for a successful upsert. Count
+            # the successfully synchronized rows instead of showing a false 0.
+            inserted += len(batch)
+        except Exception as exc:
+            st.session_state.learning_sync_error = str(exc)
     return inserted
+
+def collect_shared_learning(symbol: str, interval_key: str, df: pd.DataFrame) -> None:
+    """Add anonymized market features whenever somebody uses the app."""
+    if not learning_db_ready() or df.empty or len(df) < 250:
+        return
+    try:
+        feature_df, feature_cols = build_ml_features(df)
+        save_learning_examples(symbol, interval_key, feature_df, feature_cols)
+        status = get_learning_status()
+        state = get_supabase_client().table("learning_state").select("value").eq("key", "global").maybe_single().execute().data or {}
+        examples_at_last_training = int((state.get("value") or {}).get("examples_seen") or 0)
+        if status["examples"] >= TRAINING_MIN_SAMPLES and status["examples"] - examples_at_last_training >= AUTO_TRAIN_MIN_NEW_EXAMPLES:
+            train_and_maybe_promote_shared_model()
+    except Exception:
+        # Analysis must stay available if the optional learning service is offline.
+        return
 
 def load_learning_examples() -> pd.DataFrame:
     client = get_supabase_client()
@@ -288,8 +313,11 @@ def train_and_maybe_promote_shared_model() -> dict:
         model_id = (model_insert.data or [{}])[0].get("id")
         now = datetime.now(ZoneInfo("UTC")).isoformat()
         client.table("training_runs").update({"status": "completed" if promote else "rejected", "finished_at": now, "metrics": metrics}).eq("id", run_id).execute()
-        if promote:
-            _set_learning_state(active_model_id=model_id, examples_seen=int(len(usable)), last_training_at=now, feature_version=LEARNING_FEATURE_VERSION)
+        _set_learning_state(
+            active_model_id=model_id if promote else (previous or {}).get("id"),
+            examples_seen=int(len(usable)), last_training_at=now,
+            feature_version=LEARNING_FEATURE_VERSION,
+        )
         return {"ok": True, "promoted": promote, "metrics": metrics, "previous_accuracy": previous_accuracy, "model_id": model_id}
     except Exception as exc:
         client.table("training_runs").update({"status": "failed", "finished_at": datetime.now(ZoneInfo("UTC")).isoformat(), "error_message": str(exc)}).eq("id", run_id).execute()
@@ -659,6 +687,9 @@ if "paper_bot_result" not in st.session_state:
 
 if "paper_bot_best_params" not in st.session_state:
     st.session_state.paper_bot_best_params = None
+
+if "live_paper_account" not in st.session_state:
+    st.session_state.live_paper_account = None
 
 if "ml_result" not in st.session_state:
     st.session_state.ml_result = None
@@ -1433,8 +1464,142 @@ def simulate_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
         "trades": trades,
     }
 
+def run_live_paper_check(df: pd.DataFrame, ticker: str, account: dict) -> dict:
+    """Process one new candle for a long-only, no-money paper account."""
+    setup = calculate_trade_setup(df)
+    candle_time = str(df.index[-1])
+    price = float(setup["entry"])
+    position = account.get("position")
+    event = None
+
+    if position and position.get("ticker") == ticker:
+        close_reason = None
+        if price <= position["stop"]:
+            close_reason = "Stop-Loss erreicht"
+        elif price >= position["target"]:
+            close_reason = "Take-Profit erreicht"
+        elif setup["direction"] == "short":
+            close_reason = "Trendwechsel: EMA/RSI geben ein Verkaufssignal"
+        if close_reason:
+            proceeds = position["units"] * price
+            account["cash"] += proceeds
+            pnl = proceeds - position["cost"]
+            event = {
+                "Zeit": candle_time, "Aktion": "VERKAUF", "Asset": ticker,
+                "Preis": round(price, 4), "Menge": round(position["units"], 6),
+                "Ergebnis": round(pnl, 2), "Warum": close_reason,
+            }
+            account["position"] = None
+    elif not position and account.get("last_candle") != candle_time and setup["direction"] == "long" and setup["stop"] is not None:
+        risk_per_unit = max(price - float(setup["stop"]), 1e-9)
+        risk_budget = account["cash"] * account["risk_percent"] / 100
+        units = min(risk_budget / risk_per_unit, account["cash"] / price)
+        if units > 0:
+            cost = units * price
+            account["cash"] -= cost
+            account["position"] = {
+                "ticker": ticker, "units": units, "cost": cost, "stop": float(setup["stop"]),
+                "target": float(setup["target"]),
+            }
+            event = {
+                "Zeit": candle_time, "Aktion": "KAUF", "Asset": ticker,
+                "Preis": round(price, 4), "Menge": round(units, 6), "Ergebnis": 0.0,
+                "Warum": "Long-Signal: Kurs über EMA 9/21 und RSI im bullischen Bereich",
+            }
+
+    account["last_candle"] = candle_time
+    if event:
+        account["events"].append(event)
+    position_value = (account["position"] or {}).get("units", 0) * price
+    account["equity"] = account["cash"] + position_value
+    account["last_reason"] = event["Warum"] if event else "Keine Order: aktuelles Regelwerk liefert kein neues Long- oder Ausstiegssignal."
+    account["last_setup"] = setup
+    return account
+
+def load_scanner_account(starting_cash: float, risk_percent: float) -> tuple[dict | None, list[dict]]:
+    """Load the single server-managed scanner account and its recent orders."""
+    client = get_supabase_client()
+    if client is None:
+        return None, []
+    try:
+        result = client.table("scanner_paper_accounts").select("*").eq("account_key", SCANNER_ACCOUNT_KEY).maybe_single().execute()
+        row = result.data
+        if not row:
+            client.table("scanner_paper_accounts").insert({
+                "account_key": SCANNER_ACCOUNT_KEY, "cash": starting_cash,
+                "equity": starting_cash, "risk_percent": risk_percent,
+            }).execute()
+            row = client.table("scanner_paper_accounts").select("*").eq("account_key", SCANNER_ACCOUNT_KEY).maybe_single().execute().data
+            if not row:
+                return None, []
+        account = {
+            "cash": float(row["cash"]), "equity": float(row["equity"]),
+            "risk_percent": float(row["risk_percent"]), "position": row.get("position"),
+            "last_candle": row.get("last_candle"), "events": [],
+        }
+        orders = client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason").eq("account_key", SCANNER_ACCOUNT_KEY).order("created_at", desc=True).limit(50).execute().data or []
+        return account, orders
+    except Exception:
+        return None, []
+
+def save_scanner_account(account: dict, event: dict | None) -> None:
+    client = get_supabase_client()
+    if client is None:
+        return
+    client.table("scanner_paper_accounts").update({
+        "cash": account["cash"], "equity": account["equity"],
+        "risk_percent": account["risk_percent"], "position": account["position"],
+        "last_candle": account.get("last_candle"), "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+    }).eq("account_key", SCANNER_ACCOUNT_KEY).execute()
+    if event:
+        client.table("scanner_paper_orders").insert({
+            "account_key": SCANNER_ACCOUNT_KEY,
+            "action": "BUY" if event["Aktion"] == "KAUF" else "SELL",
+            "ticker": event["Asset"], "price": event["Preis"], "units": event["Menge"],
+            "pnl": event["Ergebnis"], "reason": event["Warum"],
+            "signal": {"source": "ema_rsi_atr_scanner"},
+        }).execute()
+
+def scan_and_trade_paper_market(account: dict, interval_key: str, limit: int) -> tuple[dict, pd.DataFrame]:
+    """Scan a capped liquid universe and paper-trade only the best valid setup."""
+    candidates = []
+    universe = list(SCANNER_UNIVERSE.items())[:limit]
+    active_ticker = (account.get("position") or {}).get("ticker")
+    if active_ticker:
+        universe = [(label, ticker) for label, ticker in SCANNER_UNIVERSE.items() if ticker == active_ticker]
+
+    for label, ticker in universe:
+        try:
+            data = load_data(ticker, interval_key, "Yahoo Finance")
+            if data.empty or len(data) < 50:
+                continue
+            setup = calculate_trade_setup(data)
+            volume_score = min(float(setup.get("volume_ratio") or 0), 3.0)
+            rsi = float(setup.get("rsi") or 0)
+            score = volume_score * 10 + (70 - abs(60 - rsi))
+            candidates.append({
+                "Asset": label, "Ticker": ticker, "Signal": setup["signal"],
+                "Score": round(score, 1), "RSI": round(rsi, 1),
+                "Volumen": round(volume_score, 2), "_data": data,
+            })
+        except Exception:
+            continue
+
+    visible = pd.DataFrame([{k: v for k, v in item.items() if k != "_data"} for item in candidates])
+    if not candidates:
+        account["last_reason"] = "Scanner konnte für das gewählte Universum keine ausreichenden Marktdaten laden."
+        return account, visible
+    candidates.sort(key=lambda item: item["Score"], reverse=True)
+    tradable = [item for item in candidates if item["Signal"].startswith("KAUFEN")]
+    chosen = tradable[0] if tradable else candidates[0]
+    before = len(account["events"])
+    account = run_live_paper_check(chosen["_data"], chosen["Ticker"], account)
+    event = account["events"][-1] if len(account["events"]) > before else None
+    save_scanner_account(account, event)
+    return account, visible.sort_values("Score", ascending=False)
+
 def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: float,
-                        min_trades: int = 8) -> dict:
+                        min_trades: int = 8, max_tests: int | None = None) -> dict:
     """
     Grid-Search über EMA/RSI/ATR/Chance-Risiko-Kombinationen.
     Bewertet wird ausschließlich auf einem Out-of-Sample-Holdout-Zeitraum,
@@ -1448,21 +1613,31 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
         "reward_risk": [1.5, 2.0, 3.0],
     }
     keys = list(grid.keys())
-    combos = list(itertools.product(*grid.values()))
+    combos = [
+        dict(zip(keys, combo))
+        for combo in itertools.product(*grid.values())
+        if combo[0] < combo[1]
+    ]
+
+    # Evenly spread a smaller test budget over the entire parameter space
+    # instead of only checking the first combinations in the grid.
+    if max_tests is not None and max_tests < len(combos):
+        selected_indices = np.linspace(0, len(combos) - 1, max_tests, dtype=int)
+        combos = [combos[index] for index in selected_indices]
 
     split = int(len(df) * 0.85)
     fit_df = df.iloc[:split].copy()
     holdout_df = df.iloc[max(0, split - 60):].copy()
 
     best = None
-    for combo in combos:
-        params = dict(zip(keys, combo))
-        if params["ema_fast"] >= params["ema_slow"]:
-            continue
+    tests_run = 0
+    for base_params in combos:
+        params = dict(base_params)
         params["rsi_bull"] = (50, 70)
         params["rsi_bear"] = (30, 50)
         params["atr_period"] = 14
 
+        tests_run += 1
         fit_result = simulate_paper_bot(fit_df, initial_capital, risk_percent, params)
         if fit_result["trade_count"] < min_trades:
             continue
@@ -1473,8 +1648,13 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
 
         score = holdout_result["return_percent"]
         if best is None or score > best["score"]:
-            best = {"params": params, "score": score, "fit": fit_result, "holdout": holdout_result}
+            best = {
+                "params": params, "score": score, "fit": fit_result,
+                "holdout": holdout_result, "tests_run": tests_run,
+            }
 
+    if best is not None:
+        best["tests_run"] = tests_run
     return best
 
 # ------------------------------------------------------------
@@ -1672,6 +1852,10 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
         return None
     if df.empty or len(df) < 20:
         return None
+
+    # Every analysis enriches the same anonymized, shared market-data pool.
+    # Labels are derived solely from public price candles, never from a user.
+    collect_shared_learning(ticker, interval_key, df)
 
     patterns_list = detect_pattern(df)
     pattern_str = ", ".join(patterns_list)
@@ -2161,6 +2345,17 @@ def render_paper_bot():
             "Parameter automatisch optimieren (Grid-Search, out-of-sample getestet)",
             value=True, key="bot_optimize",
         )
+        max_optimization_tests = 243
+        if auto_optimize:
+            max_optimization_tests = st.slider(
+                "Maximale Optimierungs-Tests",
+                min_value=10,
+                max_value=243,
+                value=81,
+                step=1,
+                help="Mehr Tests prüfen mehr Parameter-Kombinationen, dauern aber länger. 243 prüft alle verfügbaren Kombinationen.",
+                key="bot_max_optimization_tests",
+            )
 
         if st.button("Simulation starten", key="run_paper_bot"):
             ticker = ASSETS.get(bot_asset) or bot_asset
@@ -2171,7 +2366,10 @@ def render_paper_bot():
                     st.session_state.paper_bot_result = None
                     st.session_state.paper_bot_best_params = None
                 elif auto_optimize:
-                    best = optimize_paper_bot(bot_df, bot_initial_capital, bot_risk_percent)
+                    best = optimize_paper_bot(
+                        bot_df, bot_initial_capital, bot_risk_percent,
+                        max_tests=max_optimization_tests,
+                    )
                     if best is None:
                         st.warning("Keine Parameter-Kombination hat genug Trades erzeugt. Versuch ein anderes Intervall/Asset oder deaktiviere die Optimierung.")
                         st.session_state.paper_bot_result = None
@@ -2179,6 +2377,7 @@ def render_paper_bot():
                     else:
                         st.session_state.paper_bot_result = best["holdout"]
                         st.session_state.paper_bot_best_params = best["params"]
+                        st.session_state.paper_bot_test_count = best["tests_run"]
                 else:
                     st.session_state.paper_bot_result = simulate_paper_bot(bot_df, bot_initial_capital, bot_risk_percent)
                     st.session_state.paper_bot_best_params = None
@@ -2192,6 +2391,7 @@ def render_paper_bot():
                     f"EMA {bp['ema_fast']}/{bp['ema_slow']}, RSI-Periode {bp['rsi_period']}, "
                     f"ATR×{bp['atr_mult']}, Chance/Risiko {bp['reward_risk']}"
                 )
+                st.caption(f"Geprüfte Parameter-Kombinationen: {st.session_state.get('paper_bot_test_count', '–')}")
             metric_a, metric_b, metric_c, metric_d = st.columns(4)
             metric_a.metric("Endkapital", f'{result["final_equity"]:.2f} €')
             metric_b.metric("Rendite", f'{result["return_percent"]:.1f}%')
@@ -2202,6 +2402,101 @@ def render_paper_bot():
                 st.dataframe(pd.DataFrame(result["trades"]).tail(20), use_container_width=True, hide_index=True)
 
 render_paper_bot()
+
+def render_live_paper_trading():
+    with st.expander("Live-Trading (Demo / Paper)", expanded=False):
+        st.caption("Simulation mit aktuellen Yahoo-Finance-Kerzen. Es werden keine echten Broker-Orders gesendet und kein echtes Geld bewegt.")
+        live_asset = st.selectbox("Demo-Asset", list(ASSETS.keys()) + st.session_state.watchlist, key="live_asset")
+        live_interval = st.selectbox("Demo-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="live_interval")
+        live_capital, live_risk = st.columns(2)
+        with live_capital:
+            starting_cash = st.number_input("Demo-Startkapital (€)", min_value=100.0, value=1000.0, step=100.0, key="live_capital")
+        with live_risk:
+            live_risk_percent = st.number_input("Demo-Risiko pro Trade (%)", min_value=0.1, max_value=2.0, value=1.0, step=0.1, key="live_risk")
+
+        start_col, check_col = st.columns(2)
+        with start_col:
+            if st.button("Demo-Konto starten / zurücksetzen", key="start_live_paper"):
+                st.session_state.live_paper_account = {
+                    "cash": float(starting_cash), "equity": float(starting_cash),
+                    "risk_percent": float(live_risk_percent), "position": None,
+                    "events": [], "last_candle": None,
+                }
+        with check_col:
+            check_live = st.button("Markt jetzt prüfen", key="check_live_paper")
+
+        account = st.session_state.live_paper_account
+        if account is None:
+            st.info("Starte zuerst dein Demo-Konto. Danach prüft der Bot beim Klick auf „Markt jetzt prüfen“ ein neues Signal.")
+            return
+
+        if check_live:
+            ticker = ASSETS.get(live_asset) or live_asset
+            live_df = load_data(ticker, live_interval, "Yahoo Finance")
+            if live_df.empty or len(live_df) < 30:
+                st.warning("Für dieses Asset sind noch nicht genug aktuelle Kerzen verfügbar.")
+            else:
+                account["risk_percent"] = float(live_risk_percent)
+                st.session_state.live_paper_account = run_live_paper_check(live_df, ticker, account)
+                account = st.session_state.live_paper_account
+
+        price = account.get("last_setup", {}).get("entry")
+        position = account.get("position")
+        a, b, c = st.columns(3)
+        a.metric("Demo-Kontowert", f'{account["equity"]:.2f} €')
+        b.metric("Freies Guthaben", f'{account["cash"]:.2f} €')
+        c.metric("Position", "Offen" if position else "Keine")
+        if position:
+            st.caption(f'Offen: {position["units"]:.6f} Einheiten · Stop {position["stop"]:.4f} · Ziel {position["target"]:.4f}')
+        if account.get("last_reason"):
+            st.info(account["last_reason"])
+        if account["events"]:
+            st.markdown("**Käufe, Verkäufe und Begründungen**")
+            st.dataframe(pd.DataFrame(account["events"]).iloc[::-1], use_container_width=True, hide_index=True)
+        elif price is not None:
+            st.caption("Noch keine Order. Der Bot wartet auf ein Long-Signal nach seiner EMA-/RSI-Regel.")
+
+render_live_paper_trading()
+
+def render_market_scanner_paper_bot():
+    with st.expander("Markt-Scanner · gemeinsamer Demo-Bot", expanded=False):
+        st.caption("Ein gemeinsames, in Supabase gespeichertes Paper-Konto. Der Scanner bewertet liquide Aktien, ETFs und Krypto und eröffnet höchstens eine Long-Position. Keine echten Orders.")
+        scanner_interval = st.selectbox("Scanner-Intervall", ["1h", "1d"], index=1, key="scanner_interval")
+        scanner_limit = st.slider("Assets pro Scan", min_value=3, max_value=len(SCANNER_UNIVERSE), value=10, key="scanner_limit")
+        scanner_cash, scanner_risk = st.columns(2)
+        with scanner_cash:
+            scanner_starting_cash = st.number_input("Startkapital für gemeinsamen Bot (€)", min_value=100.0, value=10000.0, step=100.0, key="scanner_cash")
+        with scanner_risk:
+            scanner_risk_percent = st.number_input("Risiko je Scanner-Trade (%)", min_value=0.1, max_value=2.0, value=0.5, step=0.1, key="scanner_risk")
+        account, orders = load_scanner_account(float(scanner_starting_cash), float(scanner_risk_percent))
+        if account is None:
+            st.warning("Der gemeinsame Scanner braucht die Supabase-Secrets und die neuen Scanner-Tabellen. Führe zuerst die aktuelle SQL-Datei aus.")
+            return
+        if st.button("Markt scannen & Demo-Bot prüfen", key="run_scanner"):
+            with st.spinner("Scanne Markt und prüfe das beste Setup..."):
+                account["risk_percent"] = float(scanner_risk_percent)
+                account, candidates = scan_and_trade_paper_market(account, scanner_interval, scanner_limit)
+                st.session_state.scanner_candidates = candidates
+                _, orders = load_scanner_account(float(scanner_starting_cash), float(scanner_risk_percent))
+        else:
+            candidates = st.session_state.get("scanner_candidates")
+
+        position = account.get("position")
+        a, b, c = st.columns(3)
+        a.metric("Gemeinsamer Kontowert", f'{account["equity"]:.2f} €')
+        b.metric("Freies Guthaben", f'{account["cash"]:.2f} €')
+        c.metric("Position", position.get("ticker") if position else "Keine")
+        if account.get("last_reason"):
+            st.info(account["last_reason"])
+        if candidates is not None and not candidates.empty:
+            st.markdown("**Beste Scanner-Signale**")
+            st.dataframe(candidates.head(10), use_container_width=True, hide_index=True)
+        if orders:
+            st.markdown("**Dauerhafte Demo-Order-Historie**")
+            display_orders = pd.DataFrame(orders).rename(columns={"created_at": "Zeit", "action": "Aktion", "ticker": "Asset", "price": "Preis", "units": "Menge", "pnl": "Ergebnis", "reason": "Warum"})
+            st.dataframe(display_orders, use_container_width=True, hide_index=True)
+
+render_market_scanner_paper_bot()
 render_ml_predictor()
 
 # ------------------------------------------------------------
