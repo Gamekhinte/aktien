@@ -2535,6 +2535,7 @@ def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_cand
         font=dict(color="#e0e5ef"),
         margin=dict(l=12, r=12, t=58, b=54),
         height=340,
+        dragmode="pan",
         xaxis=dict(
             type="category",
             showgrid=False,
@@ -2542,13 +2543,25 @@ def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_cand
             tickvals=tick_values,
             tickangle=-30,
             tickfont=dict(size=10, color="#b8c2d3"),
-            rangeslider=dict(visible=False)
+            rangeslider=dict(visible=False),
+            fixedrange=False,
         ),
-        yaxis=dict(showgrid=True, gridcolor="#3b4354", tickfont=dict(color="#b8c2d3")),
+        yaxis=dict(showgrid=True, gridcolor="#3b4354", tickfont=dict(color="#b8c2d3"), fixedrange=False),
         showlegend=False,
     )
 
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": True, "displaylogo": False})
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={
+            "displayModeBar": True,
+            "displaylogo": False,
+            "scrollZoom": True,
+            "doubleClick": "autosize",
+            "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"],
+        },
+    )
+    st.caption("🖱️ Ziehen = verschieben · Scrollen/Pinch = zoomen · Doppelklick = zurücksetzen")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------
@@ -3569,16 +3582,34 @@ def render_market_scanner_paper_bot():
             st.dataframe(display_orders, use_container_width=True, hide_index=True)
 
         st.markdown("**Chart ansehen**")
-        chart_label = st.selectbox("Scanner-Chart-Asset", list(SCANNER_UNIVERSE.keys()), key="scanner_chart_asset")
-        chart_ticker = SCANNER_UNIVERSE[chart_label]
-        try:
-            chart_data = load_data(chart_ticker, scanner_interval, "Yahoo Finance")
-            if not chart_data.empty:
-                render_candlestick_chart(chart_data, "Scanner-Chart", chart_ticker)
-            else:
-                st.warning("Für dieses Chart sind gerade keine Marktdaten verfügbar.")
-        except Exception:
-            st.warning("Chart konnte gerade nicht geladen werden.")
+        chart_search = st.text_input(
+            "Ticker oder Name suchen", key="scanner_chart_search",
+            placeholder="z.B. AKAM oder Akamai",
+        )
+        if chart_search.strip():
+            needle = chart_search.strip().upper()
+            filtered_labels = [
+                name for name, symbol in SCANNER_UNIVERSE.items()
+                if needle in name.upper() or needle in symbol.upper()
+            ]
+        else:
+            filtered_labels = list(SCANNER_UNIVERSE.keys())
+
+        if not filtered_labels:
+            st.caption("Kein Treffer für diese Suche.")
+        else:
+            if st.session_state.get("scanner_chart_asset") not in filtered_labels:
+                st.session_state["scanner_chart_asset"] = filtered_labels[0]
+            chart_label = st.selectbox("Scanner-Chart-Asset", filtered_labels, key="scanner_chart_asset")
+            chart_ticker = SCANNER_UNIVERSE[chart_label]
+            try:
+                chart_data = load_data(chart_ticker, scanner_interval, "Yahoo Finance")
+                if not chart_data.empty:
+                    render_candlestick_chart(chart_data, "Scanner-Chart", chart_ticker)
+                else:
+                    st.warning("Für dieses Chart sind gerade keine Marktdaten verfügbar.")
+            except Exception:
+                st.warning("Chart konnte gerade nicht geladen werden.")
 
 render_market_scanner_paper_bot()
 render_autonomous_portfolio_bot()
