@@ -677,6 +677,14 @@ def get_supabase_client():
 def learning_db_ready() -> bool:
     return get_supabase_client() is not None
 
+def _fetch_one(query):
+    """Sicherer Ersatz für .maybe_single(): manche postgrest-py-Versionen liefern
+    bei 0 Treffern intern einen 406-Response, den .maybe_single() falsch behandelt
+    und dann None statt eines Response-Objekts zurückgibt -> AttributeError auf .data.
+    .limit(1).execute() hat dieses Problem nicht."""
+    rows = query.limit(1).execute().data or []
+    return rows[0] if rows else None
+
 def _event_key(symbol: str, interval_key: str, timestamp) -> str:
     raw = f"{symbol}|{interval_key}|{LEARNING_FEATURE_VERSION}|{timestamp}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -742,7 +750,7 @@ def collect_shared_learning(symbol: str, interval_key: str, df: pd.DataFrame) ->
         feature_df, feature_cols = build_ml_features(df)
         save_learning_examples(symbol, interval_key, feature_df, feature_cols)
         status = get_learning_status()
-        state = get_supabase_client().table("learning_state").select("value").eq("key", "global").maybe_single().execute().data or {}
+        state = _fetch_one(get_supabase_client().table("learning_state").select("value").eq("key", "global")) or {}
         examples_at_last_training = int((state.get("value") or {}).get("examples_seen") or 0)
         if status["examples"] >= TRAINING_MIN_SAMPLES and status["examples"] - examples_at_last_training >= AUTO_TRAIN_MIN_NEW_EXAMPLES:
             train_and_maybe_promote_shared_model()
@@ -797,7 +805,7 @@ def get_learning_status() -> dict:
     if client is None:
         return {"ready": False, "examples": 0, "active_model": None, "last_training": None}
     try:
-        state = client.table("learning_state").select("value").eq("key", "global").maybe_single().execute().data
+        state = _fetch_one(client.table("learning_state").select("value").eq("key", "global"))
         value = (state or {}).get("value") or {}
         count = client.table("learning_examples").select("id", count="exact").eq("feature_version", LEARNING_FEATURE_VERSION).execute().count or 0
         return {
@@ -814,7 +822,7 @@ def _set_learning_state(**updates):
     if client is None:
         return
     try:
-        current = client.table("learning_state").select("value").eq("key", "global").maybe_single().execute().data
+        current = _fetch_one(client.table("learning_state").select("value").eq("key", "global"))
         value = dict((current or {}).get("value") or {})
         value.update(updates)
         client.table("learning_state").upsert({"key": "global", "value": value}).execute()
@@ -2128,14 +2136,13 @@ def load_scanner_account(starting_cash: float, risk_percent: float) -> tuple[dic
     if client is None:
         return None, []
     try:
-        result = client.table("scanner_paper_accounts").select("*").eq("account_key", SCANNER_ACCOUNT_KEY).maybe_single().execute()
-        row = result.data
+        row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", SCANNER_ACCOUNT_KEY))
         if not row:
             client.table("scanner_paper_accounts").insert({
                 "account_key": SCANNER_ACCOUNT_KEY, "cash": starting_cash,
                 "equity": starting_cash, "risk_percent": risk_percent,
             }).execute()
-            row = client.table("scanner_paper_accounts").select("*").eq("account_key", SCANNER_ACCOUNT_KEY).maybe_single().execute().data
+            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", SCANNER_ACCOUNT_KEY))
             if not row:
                 return None, []
         account = {
@@ -3247,15 +3254,14 @@ def load_portfolio_account(account_key: str, starting_cash: float, risk_percent:
     if client is None:
         return None, []
     try:
-        result = client.table("scanner_paper_accounts").select("*").eq("account_key", account_key).maybe_single().execute()
-        row = result.data
+        row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", account_key))
         if not row:
             client.table("scanner_paper_accounts").insert({
                 "account_key": account_key, "cash": starting_cash,
                 "equity": starting_cash, "risk_percent": risk_percent,
                 "position": {"positions": []},
             }).execute()
-            row = client.table("scanner_paper_accounts").select("*").eq("account_key", account_key).maybe_single().execute().data
+            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", account_key))
             if not row:
                 return None, []
         stored = row.get("position") or {}
