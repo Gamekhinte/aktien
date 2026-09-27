@@ -2134,19 +2134,82 @@ def detect_pattern(df: pd.DataFrame) -> list[str]:
 
     return found_signals
 
-def historical_probability(df: pd.DataFrame, pattern: str) -> tuple[float, int]:
+def historical_probability(df: pd.DataFrame, pattern: str, params: dict = None, lookahead: int = 20) -> tuple[float, int]:
+    """
+    Genauigkeits-Fix: Statt nur zu prüfen, ob die NÄCHSTE Kerze etwas höher/tiefer
+    schließt (das sagt fast nichts über einen echten Trade aus), wird hier für
+    jedes historische Auftreten des Musters der TATSÄCHLICHE Trade simuliert --
+    mit demselben Stop-Loss/Take-Profit (ATR-basiert), den der Scanner auch live
+    vorschlägt. Ein "Treffer" zählt nur, wenn das Kursziel VOR dem Stop-Loss
+    erreicht wurde. Das ergibt eine realistische Trefferquote statt einer
+    irreführenden "nächste Kerze war grün/rot"-Statistik.
+    Doji/Spinning-Top (richtungslose Muster) behalten die einfache Richtungslogik,
+    da für sie kein Stop/Ziel definiert ist.
+    """
     if pattern not in PATTERNS:
         return None, 0
     fn = PATTERNS[pattern]
-    hits, ups = 0, 0
-    for i in range(len(df) - 1):
-        if fn(df, i):
-            hits += 1
-            if df.iloc[i + 1]["Close"] > df.iloc[i]["Close"]:
-                ups += 1
-    if hits == 0:
+    is_bull = "bullisch" in pattern
+    is_bear = "bärisch" in pattern
+
+    # Richtungslose Muster (Doji, Spinning Top, ...): einfache Folge-Kerzen-Logik.
+    if not is_bull and not is_bear:
+        hits, ups = 0, 0
+        for i in range(len(df) - 1):
+            if fn(df, i):
+                hits += 1
+                if df.iloc[i + 1]["Close"] > df.iloc[i]["Close"]:
+                    ups += 1
+        if hits == 0:
+            return None, 0
+        return round(100 * ups / hits, 1), hits
+
+    p = {**DEFAULT_PARAMS, **(params or {})}
+    data = _trade_indicators(df, p["ema_fast"], p["ema_slow"], p["rsi_period"], p["atr_period"])
+    atr_series = data["ATR"]
+    closes, highs, lows = df["Close"].values, df["High"].values, df["Low"].values
+    warmup = max(p["atr_period"], p["ema_slow"]) + 1
+
+    wins, total = 0, 0
+    for i in range(warmup, len(df) - 1):
+        if not fn(df, i):
+            continue
+        atr = atr_series.iloc[i]
+        if pd.isna(atr) or atr <= 0:
+            continue
+        entry = float(closes[i])
+        if is_bull:
+            stop = entry - atr * p["atr_mult"]
+            target = entry + atr * p["atr_mult"] * p["reward_risk"]
+        else:
+            stop = entry + atr * p["atr_mult"]
+            target = entry - atr * p["atr_mult"] * p["reward_risk"]
+
+        outcome = None
+        for j in range(i + 1, min(i + 1 + lookahead, len(df))):
+            hi, lo = float(highs[j]), float(lows[j])
+            if is_bull:
+                hit_stop, hit_target = lo <= stop, hi >= target
+            else:
+                hit_stop, hit_target = hi >= stop, lo <= target
+            if hit_stop and hit_target:
+                outcome = "loss"  # beides in derselben Kerze -> konservativ als Verlust werten
+                break
+            if hit_stop:
+                outcome = "loss"
+                break
+            if hit_target:
+                outcome = "win"
+                break
+        if outcome is None:
+            continue  # weder Stop noch Ziel erreicht -> kein klares Ergebnis, nicht werten
+        total += 1
+        if outcome == "win":
+            wins += 1
+
+    if total == 0:
         return None, 0
-    return round(100 * ups / hits, 1), hits
+    return round(100 * wins / total, 1), total
 
 # ------------------------------------------------------------
 # Generalisierte Regel-Indikatoren (parametrisierbar für Grid-Search)
@@ -2778,47 +2841,172 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
 # ------------------------------------------------------------
 JERRY_MASCOT_B64 = "PHN2ZyB3aWR0aD0iMzQwIiBoZWlnaHQ9IjM0MCIgdmlld0JveD0iMCAwIDY4MCA2ODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgcm9sZT0iaW1nIj4KPHRpdGxlPkplcnJ5LCBkZXIgVHJhZGluZy1Cb3Q8L3RpdGxlPgo8ZGVzYz5FaW4gc8O8w59lciwgbMOkY2hlbG5kZXIgcnVuZGVyIFJvYm90ZXIgaW4gVMO8cmtpcyBtaXQgZ3Jvw59lbiBBdWdlbiwgcm90ZW4gV2FuZ2VuIHVuZCBlaW5lciBrbGVpbmVuIEFudGVubmUgbWl0IFN0ZXJuLjwvZGVzYz4KPGNpcmNsZSBjeD0iMzQwIiBjeT0iMzQwIiByPSIzMDAiIGZpbGw9IiMxYTFmMmIiLz4KPGVsbGlwc2UgY3g9IjM0MCIgY3k9IjQ3MCIgcng9IjE1MCIgcnk9IjI2IiBmaWxsPSIjMDAwMDAwIiBvcGFjaXR5PSIwLjE4Ii8+CjxyZWN0IHg9IjMyMCIgeT0iMTUwIiB3aWR0aD0iMTAiIGhlaWdodD0iNzAiIHJ4PSI1IiBmaWxsPSIjN2ZkOGNjIi8+CjxwYXRoIGQ9Ik0zMjUgMTIyIGw0IDEwIGwxMCAxIGwtOCA3IGwzIDEwIGwtOSAtNiBsLTkgNiBsMyAtMTAgbC04IC03IGwxMCAtMSB6IiBmaWxsPSIjZmZkNTRmIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSIjMjZhNjlhIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSJub25lIiBzdHJva2U9IiMxZTg1N2EiIHN0cm9rZS13aWR0aD0iNiIvPgo8ZWxsaXBzZSBjeD0iMjQ1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8ZWxsaXBzZSBjeD0iNDM1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8Y2lyY2xlIGN4PSIyNTUiIGN5PSIzMzAiIHI9IjUyIiBmaWxsPSIjZmZmZmZmIi8+CjxjaXJjbGUgY3g9IjQyNSIgY3k9IjMzMCIgcj0iNTIiIGZpbGw9IiNmZmZmZmYiLz4KPGNpcmNsZSBjeD0iMjY2IiBjeT0iMzM4IiByPSIyNCIgZmlsbD0iIzFhMWYyYiIvPgo8Y2lyY2xlIGN4PSI0MzYiIGN5PSIzMzgiIHI9IjI0IiBmaWxsPSIjMWExZjJiIi8+CjxjaXJjbGUgY3g9IjI3NCIgY3k9IjMyOCIgcj0iOCIgZmlsbD0iI2ZmZmZmZiIvPgo8Y2lyY2xlIGN4PSI0NDQiIGN5PSIzMjgiIHI9IjgiIGZpbGw9IiNmZmZmZmYiLz4KPHBhdGggZD0iTTI1NSA0MjAgUTM0MCA0ODAgNDI1IDQyMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMWExZjJiIiBzdHJva2Utd2lkdGg9IjEwIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPHJlY3QgeD0iMTIwIiB5PSIzMzAiIHdpZHRoPSIzNCIgaGVpZ2h0PSI3MCIgcng9IjE3IiBmaWxsPSIjMWU4NTdhIi8+CjxyZWN0IHg9IjUyNiIgeT0iMzMwIiB3aWR0aD0iMzQiIGhlaWdodD0iNzAiIHJ4PSIxNyIgZmlsbD0iIzFlODU3YSIvPgo8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgzMDAsNDcwKSI+CjxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSI4MCIgaGVpZ2h0PSIzNCIgcng9IjgiIGZpbGw9IiMwZjc2NmUiLz4KPHBvbHlsaW5lIHBvaW50cz0iMTAsMjQgMjQsMTIgMzQsMjAgNDgsNiA2MCwxNCA3MCw4IiBmaWxsPSJub25lIiBzdHJva2U9IiM3ZmZmZDQiIHN0cm9rZS13aWR0aD0iNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjwvZz4KPC9zdmc+Cg=="
 
-def render_jerry_widget(mood: str, mood_text: str):
+# ------------------------------------------------------------
+# Bot-Maskottchen: Jerry (grün, Minuten-Trader), Jan (gelb, Stunden-Trader,
+# durchsichtige Brille + Basecap) und Joseph (rot, Tages-Trader, älterer Herr mit Bart).
+# Alle drei sehen sich ähnlich (gleicher Roboter-Grundkörper), unterscheiden
+# sich aber in Farbe, Accessoire und ihren Sprüchen je nach Stimmung.
+# ------------------------------------------------------------
+BOT_MASCOTS = {
+    "jerry": {
+        "name": "Jerry", "emoji": "🐣",
+        "colors": {
+            "idle": ("#26a69a", "#1e857a"), "buy": ("#29b6a3", "#1e857a"),
+            "win": ("#2ecda0", "#1e9c78"), "loss": ("#4a5568", "#374151"),
+        },
+        "badge": "#0f766e", "badge_line": "#7fffd4", "accessory": "none",
+        "texts": {
+            "idle": [
+                "Kurzer Check alle paar Minuten -- noch kein Setup, das die Eile wert ist.",
+                "Alles ruhig gerade. Auch im Minutentakt springe ich nicht auf jedes Signal an.",
+            ],
+            "buy": [
+                "Schnell, aber überlegt: kleine Position bei {ticker} eröffnet, nie mehr als ein Bruchteil des Kontos.",
+                "Eingestiegen bei {ticker} -- in kleinen Häppchen, damit auch bei schnellen Trades nichts anbrennt.",
+            ],
+            "win": [
+                "Flinker Trade, sauberer Gewinn: +{pnl:.2f} $ bei {ticker}. 🎉",
+                "Take-Profit bei {ticker} erreicht: +{pnl:.2f} $ -- weiter geht's zur nächsten Runde.",
+            ],
+            "loss": [
+                "Stop-Loss bei {ticker} gegriffen ({pnl:.2f} $) -- war von Anfang an nur ein kleiner Einsatz.",
+                "Kleiner Verlust bei {ticker} ({pnl:.2f} $). Klein bleiben, weitermachen.",
+            ],
+        },
+    },
+    "jan": {
+        "name": "Jan", "emoji": "🕶️",
+        "colors": {
+            "idle": ("#f2c14e", "#c99a2e"), "buy": ("#f5cc5c", "#c99a2e"),
+            "win": ("#ffd873", "#d9a92e"), "loss": ("#6b7280", "#4b5563"),
+        },
+        "badge": "#a9770f", "badge_line": "#ffe9a8", "accessory": "glasses",
+        "texts": {
+            "idle": [
+                "Ich checke alle paar Stunden neue Setups -- gerade ist nichts Zwingendes dabei.",
+                "Kurze Pause zwischen den Scans. Ich bleibe wachsam, aber verteile mein Kapital lieber breit.",
+            ],
+            "buy": [
+                "Neue Teilposition eröffnet bei {ticker} -- Kapital bleibt auf mehrere Trades verteilt.",
+                "Bin bei {ticker} mit begrenzter Positionsgröße eingestiegen, Rest bleibt in Reserve.",
+            ],
+            "win": [
+                "Nette Bewegung bei {ticker} mitgenommen: +{pnl:.2f} $ 😎",
+                "Take-Profit bei {ticker}: +{pnl:.2f} $ -- weiter geht's mit der nächsten Runde.",
+            ],
+            "loss": [
+                "Stop bei {ticker} ausgelöst ({pnl:.2f} $), aber nur ein Bruchteil des Kapitals war betroffen.",
+                "Verlust bei {ticker} ({pnl:.2f} $) -- durch mehrere gleichzeitige Positionen gut abgefedert.",
+            ],
+        },
+    },
+    "joseph": {
+        "name": "Joseph", "emoji": "🎩",
+        "colors": {
+            "idle": ("#e05a4e", "#a83a30"), "buy": ("#e8685c", "#a83a30"),
+            "win": ("#ef7a6e", "#b8493c"), "loss": ("#4a5568", "#374151"),
+        },
+        "badge": "#7a231a", "badge_line": "#ffb3a8", "accessory": "beard",
+        "texts": {
+            "idle": [
+                "Ruhig Blut, mein Junge. Ich beobachte den Markt in Ruhe und warte auf ein sauberes Setup...",
+                "Alles ruhig. Ich handle höchstens ein-, zweimal am Tag -- in meinem Alter lieber selten, aber solide.",
+            ],
+            "buy": [
+                "Ein alter Hase überstürzt nichts: vorsichtiger, kleiner Einstieg bei {ticker}.",
+                "Kleiner, überlegter Einstieg bei {ticker}. Kein Alles-oder-nichts hier -- das hab' ich früh gelernt.",
+            ],
+            "win": [
+                "Ein alter Hase weiß: Gewinn mitnehmen. Bei {ticker}: +{pnl:.2f} $ 🥃",
+                "Geduld zahlt sich aus -- Take-Profit bei {ticker} erreicht: +{pnl:.2f} $. So macht man das schon seit Jahrzehnten.",
+            ],
+            "loss": [
+                "Stop-Loss bei {ticker} gegriffen ({pnl:.2f} $) -- war von Anfang an nur ein kleiner Einsatz.",
+                "Kleiner Verlust bei {ticker} ({pnl:.2f} $), aber ich hab' schon ganz andere Stürme erlebt.",
+            ],
+        },
+    },
+}
+
+
+def _mascot_accessory_svg(accessory: str) -> str:
+    if accessory == "glasses":
+        # Durchsichtige Brille + Sommersprossen + verkehrt herum getragene
+        # Basecap -- macht Jan klar von Jerry und Joseph unterscheidbar.
+        return (
+            '<circle cx="230" cy="295" r="4" fill="#c99a2e" opacity="0.6"/>'
+            '<circle cx="245" cy="305" r="4" fill="#c99a2e" opacity="0.6"/>'
+            '<circle cx="260" cy="292" r="4" fill="#c99a2e" opacity="0.6"/>'
+            '<circle cx="420" cy="292" r="4" fill="#c99a2e" opacity="0.6"/>'
+            '<circle cx="435" cy="305" r="4" fill="#c99a2e" opacity="0.6"/>'
+            '<circle cx="450" cy="295" r="4" fill="#c99a2e" opacity="0.6"/>'
+            '<circle cx="255" cy="330" r="58" fill="none" stroke="#ffffff" stroke-width="6" opacity="0.55"/>'
+            '<circle cx="425" cy="330" r="58" fill="none" stroke="#ffffff" stroke-width="6" opacity="0.55"/>'
+            '<line x1="313" y1="330" x2="367" y2="330" stroke="#ffffff" stroke-width="6" opacity="0.55"/>'
+            '<path d="M180 235 Q340 155 500 235 Q500 205 340 195 Q180 205 180 235 Z" '
+            'fill="#3d6ee0" stroke="#2a4fa8" stroke-width="4"/>'
+            '<path d="M180 235 Q340 268 500 235 L500 250 Q340 283 180 250 Z" '
+            'fill="#3d6ee0" stroke="#2a4fa8" stroke-width="4"/>'
+            '<circle cx="340" cy="205" r="8" fill="#2a4fa8"/>'
+        )
+    if accessory == "beard":
+        # Grauer Vollbart + buschige weiße Augenbrauen + Halbmond-Lesebrille +
+        # Falten -- soll klar wie ein älterer, erfahrener Herr wirken.
+        return (
+            '<path d="M222 296 q30 -20 60 -4" fill="none" stroke="#e8e8e8" stroke-width="9" stroke-linecap="round"/>'
+            '<path d="M398 292 q30 -16 60 4" fill="none" stroke="#e8e8e8" stroke-width="9" stroke-linecap="round"/>'
+            '<path d="M205 352 a52 30 0 0 0 100 4" fill="none" stroke="#d7d7d7" stroke-width="6" opacity="0.85"/>'
+            '<path d="M375 356 a52 30 0 0 0 100 -4" fill="none" stroke="#d7d7d7" stroke-width="6" opacity="0.85"/>'
+            '<line x1="305" y1="352" x2="375" y2="352" stroke="#d7d7d7" stroke-width="6" opacity="0.85"/>'
+            '<path d="M225 368 q30 14 60 0" fill="none" stroke="#8f2f26" stroke-width="4" opacity="0.5" stroke-linecap="round"/>'
+            '<path d="M395 368 q30 14 60 0" fill="none" stroke="#8f2f26" stroke-width="4" opacity="0.5" stroke-linecap="round"/>'
+            '<path d="M212 392 Q248 480 340 490 Q432 480 468 392 '
+            'Q438 452 340 460 Q242 452 212 392 Z" fill="#e4e4e4" stroke="#b8b8b8" stroke-width="3"/>'
+            '<path d="M275 400 q30 18 65 18 q35 0 65 -18 q-30 26 -65 26 q-35 0 -65 -26 z" '
+            'fill="#e4e4e4" stroke="#b8b8b8" stroke-width="2"/>'
+        )
+    return ""
+
+
+def render_bot_widget(bot_key: str, mood: str, mood_text: str):
     """mood: 'idle' | 'buy' | 'win' | 'loss'. Augen folgen dem Mauszeiger,
-    Mund/Farbe/Badge ändern sich je nach Jerrys letzter Handlung."""
-    colors = {
-        "idle": ("#26a69a", "#1e857a"),
-        "buy": ("#29b6a3", "#1e857a"),
-        "win": ("#2ecda0", "#1e9c78"),
-        "loss": ("#4a5568", "#374151"),
-    }
-    body_fill, body_stroke = colors.get(mood, colors["idle"])
+    Mund/Farbe/Badge ändern sich je nach der letzten Handlung des Bots."""
+    cfg = BOT_MASCOTS.get(bot_key, BOT_MASCOTS["jerry"])
+    body_fill, body_stroke = cfg["colors"].get(mood, cfg["colors"]["idle"])
+    accessory_svg = _mascot_accessory_svg(cfg["accessory"])
+    svg_id = f"mascot-{bot_key}"
     html = f"""
     <div style="display:flex;justify-content:center;background:transparent;">
-    <svg id="jerry" width="220" height="220" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
+    <svg id="{svg_id}" width="220" height="220" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
       <rect x="320" y="150" width="10" height="70" rx="5" fill="#7fd8cc"/>
-      <polygon id="star" points="325,120 333,142 356,143 338,157 344,179 325,166 306,179 312,157 294,143 317,142"
+      <polygon id="star-{bot_key}" points="325,120 333,142 356,143 338,157 344,179 325,166 306,179 312,157 294,143 317,142"
                fill="#ffd54f"/>
       <rect x="150" y="210" width="380" height="320" rx="90" fill="{body_fill}" stroke="{body_stroke}" stroke-width="6"/>
       <ellipse cx="245" cy="380" rx="26" ry="18" fill="#ff8a80" opacity="0.5"/>
       <ellipse cx="435" cy="380" rx="26" ry="18" fill="#ff8a80" opacity="0.5"/>
       <circle cx="255" cy="330" r="52" fill="#ffffff"/>
       <circle cx="425" cy="330" r="52" fill="#ffffff"/>
-      <circle id="pupilL" cx="255" cy="330" r="24" fill="#1a1f2b"/>
-      <circle id="pupilR" cx="425" cy="330" r="24" fill="#1a1f2b"/>
+      <circle id="pupilL-{bot_key}" cx="255" cy="330" r="24" fill="#1a1f2b"/>
+      <circle id="pupilR-{bot_key}" cx="425" cy="330" r="24" fill="#1a1f2b"/>
       <circle cx="263" cy="322" r="8" fill="#ffffff" style="pointer-events:none"/>
       <circle cx="433" cy="322" r="8" fill="#ffffff" style="pointer-events:none"/>
-      <path id="mouth" d="M255 420 Q340 480 425 420" fill="none" stroke="#1a1f2b" stroke-width="10" stroke-linecap="round"/>
+      {accessory_svg}
+      <path id="mouth-{bot_key}" d="M255 420 Q340 480 425 420" fill="none" stroke="#1a1f2b" stroke-width="10" stroke-linecap="round"/>
       <rect x="120" y="330" width="34" height="70" rx="17" fill="{body_stroke}"/>
       <rect x="526" y="330" width="34" height="70" rx="17" fill="{body_stroke}"/>
       <g transform="translate(300,470)">
-        <rect width="80" height="34" rx="8" fill="#0f766e"/>
-        <polyline id="badgeLine" points="10,24 24,12 34,20 48,6 60,14 70,8" fill="none"
-                  stroke="#7fffd4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect width="80" height="34" rx="8" fill="{cfg['badge']}"/>
+        <polyline id="badgeLine-{bot_key}" points="10,24 24,12 34,20 48,6 60,14 70,8" fill="none"
+                  stroke="{cfg['badge_line']}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
       </g>
     </svg>
     </div>
     <p style="text-align:center;color:#aeb8c9;font-size:0.85em;margin-top:0.3em;">{mood_text}</p>
     <script>
     (function() {{
-        const svg = document.getElementById('jerry');
-        const pupilL = document.getElementById('pupilL');
-        const pupilR = document.getElementById('pupilR');
+        const svg = document.getElementById('{svg_id}');
+        const pupilL = document.getElementById('pupilL-{bot_key}');
+        const pupilR = document.getElementById('pupilR-{bot_key}');
         const eyes = [
             {{el: pupilL, cx: 255, cy: 330}},
             {{el: pupilR, cx: 425, cy: 330}},
@@ -2839,13 +3027,13 @@ def render_jerry_widget(mood: str, mood_text: str):
         }});
 
         const mood = "{mood}";
-        const mouth = document.getElementById('mouth');
-        const star = document.getElementById('star');
+        const mouth = document.getElementById('mouth-{bot_key}');
+        const star = document.getElementById('star-{bot_key}');
         if (mood === 'win') {{
             mouth.setAttribute('d', 'M245 415 Q340 495 435 415');
-            star.style.animation = 'spin 1.2s linear infinite';
+            star.style.animation = 'spin-{bot_key} 1.2s linear infinite';
             const styleTag = document.createElement('style');
-            styleTag.textContent = '@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }} #star {{ transform-origin: 325px 150px; }}';
+            styleTag.textContent = '@keyframes spin-{bot_key} {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }} #star-{bot_key} {{ transform-origin: 325px 150px; }}';
             document.head.appendChild(styleTag);
         }} else if (mood === 'loss') {{
             mouth.setAttribute('d', 'M255 445 Q340 405 425 445');
@@ -2858,20 +3046,55 @@ def render_jerry_widget(mood: str, mood_text: str):
     """
     components.html(html, height=280)
 
-def render_jerry_daytrader():
-    """Jerry: vollautomatischer Day-Trading-Bot. Läuft unabhängig von dieser
-    Streamlit-Seite per GitHub Actions im Hintergrund (siehe jerry_bot.py).
-    Diese Ansicht ist rein informativ -- es gibt bewusst keine manuellen
-    Steuerelemente, Jerry trifft alle Entscheidungen selbst."""
-    with st.expander("🐣 Jerry · autonomer Day-Trading-Bot", expanded=True):
+
+def render_jerry_widget(mood: str, mood_text: str):
+    """Rückwärtskompatibler Alias -- ruft render_bot_widget für Jerry auf."""
+    render_bot_widget("jerry", mood, mood_text)
+
+import random as _bot_random
+
+# Konfiguration der drei Trading-Bot-Varianten. Alle drei teilen sich dieselbe
+# Engine (siehe bot_engine.py / jerry_bot.py, jan_bot.py, joseph_bot.py),
+# unterscheiden sich aber in Handelsfrequenz und wie stark sie ihr Kapital
+# auf mehrere gleichzeitige Positionen verteilen.
+BOT_VARIANTS = {
+    "jerry": {
+        "account_key": "jerry_bot_v1", "label": "Jerry · Minuten-Trader (grün)",
+        "frequency": "Handelt alle paar Minuten (5-15min-Kerzen).",
+        "sizing": "Verteilt Kapital auf bis zu 6 Positionen à max. 10 % des Kontos -- "
+                   "bei hoher Frequenz besonders kleine Häppchen, um nicht zu überdrehen.",
+    },
+    "jan": {
+        "account_key": "jan_bot_v1", "label": "Jan · Stunden-Trader (gelb)",
+        "frequency": "Handelt alle paar Stunden (1h-Kerzen).",
+        "sizing": "Verteilt Kapital auf bis zu 5 Positionen à max. 15 % des Kontos.",
+    },
+    "joseph": {
+        "account_key": "joseph_bot_v1", "label": "Joseph · Tages-Trader (rot)",
+        "frequency": "Handelt höchstens 1-2x pro Tag (Tages-Kerzen).",
+        "sizing": "Verteilt Kapital auf bis zu 4 Positionen à max. 20 % des Kontos.",
+    },
+}
+
+
+def render_trading_bot(bot_key: str):
+    """Gemeinsame, informative Statusansicht für Jerry / Jan / Joseph.
+    Läuft unabhängig von dieser Streamlit-Seite per GitHub Actions im
+    Hintergrund. Diese Ansicht ist rein informativ -- es gibt bewusst keine
+    manuellen Steuerelemente, der jeweilige Bot trifft alle Entscheidungen
+    selbst, inklusive Diversifikation über mehrere gleichzeitige Positionen."""
+    cfg = BOT_MASCOTS[bot_key]
+    variant = BOT_VARIANTS[bot_key]
+    account_key = variant["account_key"]
+    with st.expander(f"{cfg['emoji']} {variant['label']} · autonomer Trading-Bot", expanded=True):
         client = get_supabase_client()
         if client is None:
-            st.warning("Kein Supabase-Client verfügbar -- Jerrys Status kann gerade nicht geladen werden.")
+            st.warning(f"Kein Supabase-Client verfügbar -- {cfg['name']}s Status kann gerade nicht geladen werden.")
             return
         try:
-            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", "jerry_bot_v1"))
+            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", account_key))
         except Exception as exc:
-            st.warning(f"Jerrys Status konnte nicht geladen werden: {exc}")
+            st.warning(f"{cfg['name']}s Status konnte nicht geladen werden: {exc}")
             return
 
         orders = []
@@ -2879,46 +3102,70 @@ def render_jerry_daytrader():
             try:
                 orders = (
                     client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
-                    .eq("account_key", "jerry_bot_v1").order("created_at", desc=True).limit(30).execute().data or []
+                    .eq("account_key", account_key).order("created_at", desc=True).limit(30).execute().data or []
                 )
             except Exception:
                 orders = []
 
-        mood, mood_text = "idle", "Ich beobachte den Markt und warte auf ein gutes Signal..."
+        mood, mood_text = "idle", _bot_random.choice(cfg["texts"]["idle"])
         if orders:
             last = orders[0]
             if last["action"] == "BUY":
-                mood, mood_text = "buy", f"Gerade eingestiegen bei {last['ticker']}! 🚀"
+                mood = "buy"
+                mood_text = _bot_random.choice(cfg["texts"]["buy"]).format(ticker=last["ticker"])
             elif last["action"] == "SELL":
                 pnl = float(last.get("pnl") or 0)
-                if pnl > 0:
-                    mood, mood_text = "win", f"Gewinn eingefahren bei {last['ticker']}: +{pnl:.2f} $ 🎉"
-                else:
-                    mood, mood_text = "loss", f"Verlust bei {last['ticker']}: {pnl:.2f} $ — weiter geht's."
+                mood = "win" if pnl > 0 else "loss"
+                mood_text = _bot_random.choice(cfg["texts"][mood]).format(ticker=last["ticker"], pnl=pnl)
 
         col_img, col_info = st.columns([1, 2])
         with col_img:
-            render_jerry_widget(mood, mood_text)
+            render_bot_widget(bot_key, mood, mood_text)
         with col_info:
             weekday = datetime.now(ZoneInfo("Europe/Berlin")).weekday()
             modus = "Krypto-Modus (Wochenende)" if weekday >= 5 else "Aktien-Modus (Werktag)"
-            st.markdown(f"**Hallo, ich bin Jerry! 👋** Aktueller Modus: **{modus}**")
+            st.markdown(f"**Hallo, ich bin {cfg['name']}! {cfg['emoji']}** Aktueller Modus: **{modus}**")
             st.caption(
-                "Ich handle rund um die Uhr selbstständig im Hintergrund über GitHub Actions -- "
-                "auch wenn niemand diese Seite geöffnet hat. Am Wochenende fokussiere ich mich auf "
-                "Krypto, unter der Woche auf Aktien. Alle Entscheidungen treffe ich eigenständig "
-                "nach festen Regeln (EMA/RSI/ATR) -- hier gibt es nichts manuell zu bedienen."
+                f"{variant['frequency']} {variant['sizing']} Ich handle rund um die Uhr selbstständig im "
+                "Hintergrund über GitHub Actions -- auch wenn niemand diese Seite geöffnet hat. Am "
+                "Wochenende fokussiere ich mich auf Krypto, unter der Woche auf Aktien. Alle "
+                "Entscheidungen treffe ich eigenständig nach festen Regeln (EMA/RSI/ATR) -- hier gibt "
+                "es nichts manuell zu bedienen."
             )
 
         if not row:
-            st.info("Jerry hat noch keinen ersten Lauf hinter sich. Sobald der GitHub-Actions-Cron einmal gelaufen ist, erscheinen hier Kontostand und Trades.")
+            st.info(f"{cfg['name']} hat noch keinen ersten Lauf hinter sich. Sobald der GitHub-Actions-Cron einmal gelaufen ist, erscheinen hier Kontostand und Trades.")
             return
+
+        positions_raw = row.get("position")
+        # Abwärtskompatibel: alte Konten speichern eine einzelne Position (dict),
+        # die neue Multi-Positions-Engine speichert eine Liste von Positionen.
+        if isinstance(positions_raw, dict):
+            positions = [positions_raw]
+        elif isinstance(positions_raw, list):
+            positions = positions_raw
+        else:
+            positions = []
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Kontowert", f"{float(row['equity']):,.2f} $")
         c2.metric("Guthaben (Cash)", f"{float(row['cash']):,.2f} $")
-        position = row.get("position")
-        c3.metric("Offene Position", position.get("ticker") if position else "Keine")
+        c3.metric("Offene Positionen", str(len(positions)) if positions else "Keine")
+
+        if positions:
+            st.markdown("**Aktuell offene Positionen (diversifiziert, nicht \"alles auf eine Karte\")**")
+            pos_df = pd.DataFrame([
+                {
+                    "Asset": p.get("ticker"),
+                    "Einstieg": round(float(p.get("entry", 0)), 4),
+                    "Menge": round(float(p.get("units", 0)), 6),
+                    "Kapitalanteil": f"{(float(p.get('cost', 0)) / float(row['equity']) * 100):.1f} %" if float(row.get("equity") or 0) else "–",
+                    "Stop-Loss": round(float(p.get("stop", 0)), 4) if p.get("stop") is not None else "–",
+                    "Take-Profit": round(float(p.get("target", 0)), 4) if p.get("target") is not None else "–",
+                }
+                for p in positions
+            ])
+            st.dataframe(pos_df, use_container_width=True, hide_index=True)
 
         st.markdown("**Handelsprotokoll (Zeitstempel, neueste zuerst)**")
         if orders:
@@ -3734,7 +3981,7 @@ def batch_load_ohlc(tickers: list[str], interval_key: str) -> dict[str, pd.DataF
 def scan_extreme_patterns(
     universe: dict[str, str], interval_key: str, scan_limit: int,
     bullish_threshold: float = 70.0, bearish_threshold: float = 30.0,
-    min_hits: int = 15, chunk_size: int = 60,
+    min_hits: int = 20, chunk_size: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Scannt ein Asset-Universum nach Kerzenmustern mit historisch sehr klarer
@@ -4290,7 +4537,9 @@ st.markdown('<div class="section-label">Bereich</div>', unsafe_allow_html=True)
 _bot_section = st.selectbox(
     "Bereich wählen", label_visibility="collapsed",
     options=[
-        "Jerry (autonomer Day-Trader)",
+        "Jerry (grün, Minuten-Trader)",
+        "Jan (gelb, Stunden-Trader)",
+        "Joseph (rot, Tages-Trader)",
         "Markt-Scanner (Demo-Bot)",
         "Autonomer Portfolio-Bot",
         "Extreme-Pattern-Scanner",
@@ -4298,8 +4547,12 @@ _bot_section = st.selectbox(
     ],
     key="top_bot_section",
 )
-if _bot_section == "Jerry (autonomer Day-Trader)":
-    render_jerry_daytrader()
+if _bot_section == "Jerry (grün, Minuten-Trader)":
+    render_trading_bot("jerry")
+elif _bot_section == "Jan (gelb, Stunden-Trader)":
+    render_trading_bot("jan")
+elif _bot_section == "Joseph (rot, Tages-Trader)":
+    render_trading_bot("joseph")
 elif _bot_section == "Markt-Scanner (Demo-Bot)":
     render_market_scanner_paper_bot()
 elif _bot_section == "Autonomer Portfolio-Bot":
