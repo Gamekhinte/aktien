@@ -27,6 +27,8 @@ import itertools
 import hashlib
 import urllib.request
 import urllib.error
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -2955,6 +2957,122 @@ def render_risk_disclaimer():
         unsafe_allow_html=True,
     )
 
+# ------------------------------------------------------------
+# Trend-Fortschreibung (einfache lineare Regression, Linienchart)
+# ------------------------------------------------------------
+def render_trend_forecast_chart(df: pd.DataFrame, ticker: str, lookback: int = 30, forecast_steps: int = 10):
+    closes = df["Close"].tail(lookback).astype(float).values
+    if len(closes) < 5:
+        return
+    x = np.arange(len(closes))
+    slope, intercept = np.polyfit(x, closes, 1)
+    forecast_x = np.arange(len(closes) - 1, len(closes) + forecast_steps)
+    forecast_y = slope * forecast_x + intercept
+
+    trend_color = "#3dd6b0" if slope >= 0 else "#ff6b6b"
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=list(x), y=list(closes), mode="lines", name="Kursverlauf",
+        line=dict(color="#8fa3c8", width=2),
+    ))
+    fig.add_trace(go.Scatter(
+        x=list(forecast_x), y=list(forecast_y), mode="lines", name="Trendfortschreibung",
+        line=dict(color=trend_color, width=2, dash="dash"),
+    ))
+    fig.update_layout(
+        paper_bgcolor="#252b39", plot_bgcolor="#252b39", font=dict(color="#e0e5ef"),
+        margin=dict(l=12, r=12, t=30, b=30), height=260,
+        xaxis=dict(showgrid=False, showticklabels=False, title="Zeit (Kerzen)"),
+        yaxis=dict(showgrid=True, gridcolor="#3b4354", tickfont=dict(color="#b8c2d3")),
+        showlegend=True, legend=dict(orientation="h", y=-0.15),
+    )
+    st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.markdown('</div>', unsafe_allow_html=True)
+    direction = "steigende" if slope >= 0 else "fallende"
+    st.caption(
+        f"Einfache lineare Trendfortschreibung der letzten {lookback} Kerzen, {forecast_steps} Kerzen in die Zukunft "
+        f"verlängert — aktuell {direction} Tendenz. Das ist reine Statistik (Geradengleichung durch die "
+        "Vergangenheit), keine echte Prognose und keine Anlageberatung. Nachrichten, Volumen oder plötzliche "
+        "Ereignisse sind hier nicht berücksichtigt."
+    )
+
+# ------------------------------------------------------------
+# Aktuelle Nachrichten zum Asset (Google News RSS, kein API-Key nötig;
+# optional eigener NewsAPI-Key für mehr Kontrolle)
+# ------------------------------------------------------------
+def fetch_news_google_rss(query: str, max_items: int = 6) -> list[dict]:
+    try:
+        url = "https://news.google.com/rss/search?q=" + urllib.parse.quote(query) + "&hl=de&gl=DE&ceid=DE:de"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = response.read()
+        root = ET.fromstring(data)
+        items = []
+        for item in root.findall(".//item")[:max_items]:
+            source_el = item.find("source")
+            items.append({
+                "title": (item.findtext("title") or "").strip(),
+                "link": (item.findtext("link") or "").strip(),
+                "pubDate": (item.findtext("pubDate") or "").strip(),
+                "source": source_el.text if source_el is not None else "",
+            })
+        return items
+    except Exception:
+        return []
+
+def fetch_news_newsapi(query: str, api_key: str, max_items: int = 6) -> list[dict]:
+    try:
+        params = urllib.parse.urlencode({
+            "q": query, "language": "de", "sortBy": "publishedAt", "pageSize": max_items,
+        })
+        req = urllib.request.Request(
+            f"https://newsapi.org/v2/everything?{params}",
+            headers={"User-Agent": "Mozilla/5.0", "X-Api-Key": api_key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        items = []
+        for article in payload.get("articles", [])[:max_items]:
+            items.append({
+                "title": article.get("title", ""), "link": article.get("url", ""),
+                "pubDate": article.get("publishedAt", ""),
+                "source": (article.get("source") or {}).get("name", ""),
+            })
+        return items
+    except Exception:
+        return []
+
+def render_news_section(query: str):
+    with st.expander("Aktuelle Nachrichten zu diesem Asset", expanded=False):
+        if "news_api_key" not in st.session_state:
+            st.session_state.news_api_key = ""
+        st.session_state.news_api_key = st.text_input(
+            "Eigener NewsAPI-Key (optional)", type="password", value=st.session_state.news_api_key,
+            placeholder="Ohne Key wird automatisch Google News verwendet",
+            key="news_api_key_input",
+            help="newsapi.org bietet einen kostenlosen Key für begrenztes Volumen. Ganz ohne Key funktioniert es über Google News RSS.",
+        )
+        news_items = (
+            fetch_news_newsapi(query, st.session_state.news_api_key, max_items=6)
+            if st.session_state.news_api_key
+            else fetch_news_google_rss(query, max_items=6)
+        )
+        if not news_items:
+            st.caption("Aktuell keine Nachrichten gefunden oder die Quelle war gerade nicht erreichbar.")
+        else:
+            for article in news_items:
+                pub = article["pubDate"][:16].replace("T", " ") if article["pubDate"] else ""
+                st.markdown(
+                    f"**[{article['title']}]({article['link']})**  \n"
+                    f"<span style='color:#8996aa;font-size:0.8em;'>{article['source']} · {pub}</span>",
+                    unsafe_allow_html=True,
+                )
+        st.caption(
+            "Nachrichten dienen nur zur Einordnung und fließen nicht automatisch in die Trend- oder "
+            "Musteranalyse oben ein. Keine Anlageberatung."
+        )
+
 def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_candles: int = 90):
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
 
@@ -4254,6 +4372,12 @@ with tab1:
         )
         render_trade_setup(result["trade_setup"], result["ticker"], interval_label)
         render_candlestick_chart(result["df"], result["pattern"], result["ticker"])
+
+        st.markdown('<div class="section-label">Trend-Fortschreibung</div>', unsafe_allow_html=True)
+        render_trend_forecast_chart(result["df"], result["ticker"])
+
+        news_query = asset_choice.split(" (")[0]
+        render_news_section(news_query)
 
         provider_key = {
             "Gemini": st.session_state.gemini_api_key,
