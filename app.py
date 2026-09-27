@@ -654,12 +654,7 @@ SCANNER_UNIVERSE["Zoetis"] = "ZTS"
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
-    st.session_state["_supabase_last_error"] = None
     if not SUPABASE_PACKAGE_AVAILABLE:
-        st.session_state["_supabase_last_error"] = (
-            "Das Python-Paket 'supabase' ist nicht installiert (Import ist fehlgeschlagen). "
-            "Bitte in requirements.txt prüfen, ob dort 'supabase' steht, und die App neu deployen."
-        )
         return None
     try:
         url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
@@ -673,16 +668,10 @@ def get_supabase_client():
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
-        st.session_state["_supabase_last_error"] = (
-            f"SUPABASE_URL {'gefunden' if url else 'FEHLT'}, "
-            f"SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY {'gefunden' if key else 'FEHLT'} "
-            "in st.secrets bzw. den Umgebungsvariablen."
-        )
         return None
     try:
         return create_client(url, key)
-    except Exception as error:
-        st.session_state["_supabase_last_error"] = f"create_client() ist fehlgeschlagen: {error!r}"
+    except Exception:
         return None
 
 def learning_db_ready() -> bool:
@@ -693,12 +682,22 @@ def _event_key(symbol: str, interval_key: str, timestamp) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFrame, feature_cols: list[str]) -> int:
+    """Speichert Learning-Examples in Supabase per Upsert.
+
+    Zählt Zeilen über die Batch-Länge statt über res.data, da Supabase bei
+    upsert() ohne .select() standardmäßig keinen Response-Body liefert.
+    """
+    st.session_state.learning_sync_error = None  # alten Fehler nicht stehen lassen
+
     client = get_supabase_client()
     if client is None:
+        st.session_state.learning_sync_error = "Kein Supabase-Client verfügbar."
         return 0
+
     usable = feature_df.dropna(subset=feature_cols + ["target"]).copy()
     if usable.empty:
         return 0
+
     rows = []
     for idx, row in usable.iterrows():
         timestamp = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
@@ -715,16 +714,24 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
             "source": "paper",
             "event_key": _event_key(symbol, interval_key, timestamp),
         })
+
     inserted = 0
+    errors = []
+
     for start in range(0, len(rows), 500):
         batch = rows[start:start + 500]
         try:
+            # Kein .select() nötig – wir wollen den Body nicht zurückbekommen,
+            # das spart Netzwerk-Overhead. Erfolgreicher .execute() ohne
+            # Exception bedeutet: der gesamte Batch wurde geschrieben.
             client.table("learning_examples").upsert(batch, on_conflict="event_key").execute()
-            # Supabase may return no row body for a successful upsert. Count
-            # the successfully synchronized rows instead of showing a false 0.
             inserted += len(batch)
         except Exception as exc:
-            st.session_state.learning_sync_error = str(exc)
+            errors.append(f"Batch {start}-{start + len(batch)}: {exc}")
+
+    if errors:
+        st.session_state.learning_sync_error = "; ".join(errors)
+
     return inserted
 
 def collect_shared_learning(symbol: str, interval_key: str, df: pd.DataFrame) -> None:
@@ -2138,8 +2145,7 @@ def load_scanner_account(starting_cash: float, risk_percent: float) -> tuple[dic
         }
         orders = client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason").eq("account_key", SCANNER_ACCOUNT_KEY).order("created_at", desc=True).limit(50).execute().data or []
         return account, orders
-    except Exception as error:
-        st.session_state["_supabase_last_error"] = f"Supabase-Abfrage fehlgeschlagen: {error!r}"
+    except Exception:
         return None, []
 
 def save_scanner_account(account: dict, event: dict | None) -> None:
@@ -3431,9 +3437,6 @@ def render_autonomous_portfolio_bot():
             account, orders_before = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
             if account is None:
                 st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
-                error_detail = st.session_state.get("_supabase_last_error")
-                if error_detail:
-                    st.code(error_detail, language="text")
                 return
             account["risk_percent"] = float(portfolio_risk)
             account, candidates_df = run_autonomous_portfolio_scan(
@@ -3457,9 +3460,6 @@ def render_autonomous_portfolio_bot():
         account, orders = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
         if account is None:
             st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
-            error_detail = st.session_state.get("_supabase_last_error")
-            if error_detail:
-                st.code(error_detail, language="text")
             return
 
         last_run = st.session_state.get("portfolio_last_run")
@@ -3533,9 +3533,6 @@ def render_market_scanner_paper_bot():
         account, orders = load_scanner_account(float(scanner_starting_cash), float(scanner_risk_percent))
         if account is None:
             st.warning("Der gemeinsame Scanner braucht die Supabase-Secrets und die neuen Scanner-Tabellen. Führe zuerst die aktuelle SQL-Datei aus.")
-            error_detail = st.session_state.get("_supabase_last_error")
-            if error_detail:
-                st.code(error_detail, language="text")
             return
         if st.button("Markt scannen & Demo-Bot prüfen", key="run_scanner"):
             with st.spinner("Scanne Markt und prüfe das beste Setup..."):
