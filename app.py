@@ -654,7 +654,12 @@ SCANNER_UNIVERSE["Zoetis"] = "ZTS"
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
+    st.session_state["_supabase_last_error"] = None
     if not SUPABASE_PACKAGE_AVAILABLE:
+        st.session_state["_supabase_last_error"] = (
+            "Das Python-Paket 'supabase' ist nicht installiert (Import ist fehlgeschlagen). "
+            "Bitte in requirements.txt prüfen, ob dort 'supabase' steht, und die App neu deployen."
+        )
         return None
     try:
         url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
@@ -668,10 +673,16 @@ def get_supabase_client():
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
+        st.session_state["_supabase_last_error"] = (
+            f"SUPABASE_URL {'gefunden' if url else 'FEHLT'}, "
+            f"SUPABASE_SECRET_KEY/SUPABASE_SERVICE_ROLE_KEY {'gefunden' if key else 'FEHLT'} "
+            "in st.secrets bzw. den Umgebungsvariablen."
+        )
         return None
     try:
         return create_client(url, key)
-    except Exception:
+    except Exception as error:
+        st.session_state["_supabase_last_error"] = f"create_client() ist fehlgeschlagen: {error!r}"
         return None
 
 def learning_db_ready() -> bool:
@@ -2127,7 +2138,8 @@ def load_scanner_account(starting_cash: float, risk_percent: float) -> tuple[dic
         }
         orders = client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason").eq("account_key", SCANNER_ACCOUNT_KEY).order("created_at", desc=True).limit(50).execute().data or []
         return account, orders
-    except Exception:
+    except Exception as error:
+        st.session_state["_supabase_last_error"] = f"Supabase-Abfrage fehlgeschlagen: {error!r}"
         return None, []
 
 def save_scanner_account(account: dict, event: dict | None) -> None:
@@ -3419,6 +3431,9 @@ def render_autonomous_portfolio_bot():
             account, orders_before = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
             if account is None:
                 st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
+                error_detail = st.session_state.get("_supabase_last_error")
+                if error_detail:
+                    st.code(error_detail, language="text")
                 return
             account["risk_percent"] = float(portfolio_risk)
             account, candidates_df = run_autonomous_portfolio_scan(
@@ -3442,6 +3457,9 @@ def render_autonomous_portfolio_bot():
         account, orders = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
         if account is None:
             st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
+            error_detail = st.session_state.get("_supabase_last_error")
+            if error_detail:
+                st.code(error_detail, language="text")
             return
 
         last_run = st.session_state.get("portfolio_last_run")
@@ -3515,6 +3533,9 @@ def render_market_scanner_paper_bot():
         account, orders = load_scanner_account(float(scanner_starting_cash), float(scanner_risk_percent))
         if account is None:
             st.warning("Der gemeinsame Scanner braucht die Supabase-Secrets und die neuen Scanner-Tabellen. Führe zuerst die aktuelle SQL-Datei aus.")
+            error_detail = st.session_state.get("_supabase_last_error")
+            if error_detail:
+                st.code(error_detail, language="text")
             return
         if st.button("Markt scannen & Demo-Bot prüfen", key="run_scanner"):
             with st.spinner("Scanne Markt und prüfe das beste Setup..."):
