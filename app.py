@@ -15,6 +15,7 @@
 # ============================================================
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -26,6 +27,8 @@ import itertools
 import hashlib
 import urllib.request
 import urllib.error
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -916,6 +919,10 @@ def learning_db_ready() -> bool:
     return get_supabase_client() is not None
 
 def _fetch_one(query):
+    """Sicherer Ersatz für .maybe_single(): manche postgrest-py-Versionen liefern
+    bei 0 Treffern intern einen 406-Response, den .maybe_single() falsch behandelt
+    und dann None statt eines Response-Objekts zurückgibt -> AttributeError auf .data.
+    .limit(1).execute() hat dieses Problem nicht."""
     rows = query.limit(1).execute().data or []
     return rows[0] if rows else None
 
@@ -924,7 +931,12 @@ def _event_key(symbol: str, interval_key: str, timestamp) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFrame, feature_cols: list[str]) -> int:
-    st.session_state.learning_sync_error = None
+    """Speichert Learning-Examples in Supabase per Upsert.
+
+    Zählt Zeilen über die Batch-Länge statt über res.data, da Supabase bei
+    upsert() ohne .select() standardmäßig keinen Response-Body liefert.
+    """
+    st.session_state.learning_sync_error = None  # alten Fehler nicht stehen lassen
 
     client = get_supabase_client()
     if client is None:
@@ -934,10 +946,14 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
     usable = feature_df.dropna(subset=feature_cols + ["target"]).copy()
     if usable.empty:
         return 0
+    if "Date" not in usable.columns:
+        st.session_state.learning_sync_error = "Feature-DataFrame enthält keine 'Date'-Spalte."
+        return 0
 
     rows = []
-    for idx, row in usable.iterrows():
-        timestamp = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
+    for _, row in usable.iterrows():
+        ts = row["Date"]
+        timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
         features = {name: float(row[name]) for name in feature_cols}
         future_return = row.get("future_return")
         rows.append({
@@ -958,6 +974,9 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
     for start in range(0, len(rows), 500):
         batch = rows[start:start + 500]
         try:
+            # Kein .select() nötig – wir wollen den Body nicht zurückbekommen,
+            # das spart Netzwerk-Overhead. Erfolgreicher .execute() ohne
+            # Exception bedeutet: der gesamte Batch wurde geschrieben.
             client.table("learning_examples").upsert(batch, on_conflict="event_key").execute()
             inserted += len(batch)
         except Exception as exc:
@@ -969,6 +988,7 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
     return inserted
 
 def collect_shared_learning(symbol: str, interval_key: str, df: pd.DataFrame) -> None:
+    """Add anonymized market features whenever somebody uses the app."""
     if not learning_db_ready() or df.empty or len(df) < 250:
         return
     try:
@@ -980,6 +1000,7 @@ def collect_shared_learning(symbol: str, interval_key: str, df: pd.DataFrame) ->
         if status["examples"] >= TRAINING_MIN_SAMPLES and status["examples"] - examples_at_last_training >= AUTO_TRAIN_MIN_NEW_EXAMPLES:
             train_and_maybe_promote_shared_model()
     except Exception:
+        # Analysis must stay available if the optional learning service is offline.
         return
 
 def load_learning_examples() -> pd.DataFrame:
@@ -1015,6 +1036,9 @@ def load_learning_examples() -> pd.DataFrame:
         record["target"] = int(item["target"])
         record["symbol"] = item.get("symbol")
         record["interval_key"] = item.get("interval_key")
+        # created_at says when a user uploaded a candle, not when the candle
+        # existed. Training by it would leak newer market data into earlier
+        # validation folds when users sync assets at different times.
         record["label_time"] = item.get("label_time") or item.get("created_at")
         records.append(record)
     data = pd.DataFrame(records)
@@ -1104,6 +1128,8 @@ def train_and_maybe_promote_shared_model() -> dict:
 
         new_accuracy = float(np.mean(fold_accuracies))
         positive_rate = float(usable["target"].mean())
+        # Accuracy is only meaningful if it beats the trivial majority-class
+        # predictor. For an imbalanced data set, "always up" can look good.
         baseline = max(positive_rate, 1 - positive_rate)
         final_model = GradientBoostingClassifier(n_estimators=150, max_depth=3, learning_rate=0.05, random_state=42)
         final_model.fit(usable[feature_cols], usable["target"])
@@ -1120,6 +1146,8 @@ def train_and_maybe_promote_shared_model() -> dict:
         if previous:
             previous_accuracy = ((previous.get("validation_metrics") or {}).get("mean_accuracy"))
 
+        # A candidate must beat a naive baseline and must not degrade the
+        # active model. This keeps noise from becoming the production model.
         beats_baseline = new_accuracy >= baseline
         promote = beats_baseline and (previous is None or previous_accuracy is None or new_accuracy * 100 >= float(previous_accuracy))
         model_row = {
@@ -1128,6 +1156,9 @@ def train_and_maybe_promote_shared_model() -> dict:
             "feature_version": LEARNING_FEATURE_VERSION,
             "sample_count": int(len(usable)),
             "validation_metrics": metrics,
+            # Do not store pickle payloads in a database: loading an altered
+            # pickle can execute arbitrary code. The app only needs metrics
+            # and retrains from verified examples on demand.
             "model_artifact_base64": None,
             "promoted": bool(promote),
             "rejection_reason": None if promote else (
@@ -1475,6 +1506,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ------------------------------------------------------------
 # Gemeinsame Konfiguration
 # ------------------------------------------------------------
@@ -1484,6 +1516,7 @@ ASSETS = {
     "Apple (AAPL)": "AAPL",
     "Tesla (TSLA)": "TSLA",
     "Nvidia (NVDA)": "NVDA",
+    **SCANNER_UNIVERSE,
 }
 
 INTERVAL_CONFIG = {
@@ -1513,8 +1546,14 @@ if "anthropic_api_key" not in st.session_state:
 if "ai_cache" not in st.session_state:
     st.session_state.ai_cache = {}
 
-if "single_results_list" not in st.session_state:
-    st.session_state.single_results_list = []
+if "single_result" not in st.session_state:
+    st.session_state.single_result = None
+
+if "single_ai_text" not in st.session_state:
+    st.session_state.single_ai_text = None
+
+if "single_ai_key" not in st.session_state:
+    st.session_state.single_ai_key = None
 
 if "ibkr_feed" not in st.session_state:
     st.session_state.ibkr_feed = None
@@ -1589,6 +1628,25 @@ with st.expander("Marktdatenquelle", expanded=False):
 # ------------------------------------------------------------
 # Daten laden
 # ------------------------------------------------------------
+def searchable_asset_select(
+    label: str, options: list[str], key: str,
+    placeholder: str = "z.B. AAPL oder Apple", label_visibility: str = "visible",
+) -> str | None:
+    """Selectbox mit vorgeschalteter Text-Suche, für Listen mit sehr vielen Assets."""
+    search_key = f"{key}__search"
+    search_value = st.text_input(f"{label} suchen", key=search_key, placeholder=placeholder, label_visibility="collapsed" if label_visibility == "collapsed" else "visible")
+    if search_value.strip():
+        needle = search_value.strip().upper()
+        filtered = [name for name in options if needle in name.upper()]
+    else:
+        filtered = options
+    if not filtered:
+        st.caption("Kein Treffer für diese Suche.")
+        return None
+    if st.session_state.get(key) not in filtered:
+        st.session_state[key] = filtered[0]
+    return st.selectbox(label, filtered, key=key, label_visibility=label_visibility)
+
 def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> pd.DataFrame:
     if source == "Interactive Brokers Paper-Feed":
         feed = st.session_state.get("ibkr_feed")
@@ -2203,6 +2261,7 @@ def calculate_trade_setup(df: pd.DataFrame, params: dict = None) -> dict:
 
 def simulate_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: float,
                         params: dict = None) -> dict:
+    """Testet eine EMA/RSI/ATR-Regel ohne echte Orders oder Look-ahead."""
     p = {**DEFAULT_PARAMS, **(params or {})}
     data = _trade_indicators(
         df, p["ema_fast"], p["ema_slow"], p["rsi_period"], p["atr_period"]
@@ -2301,6 +2360,7 @@ def simulate_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
     }
 
 def run_live_paper_check(df: pd.DataFrame, ticker: str, account: dict) -> dict:
+    """Process one new candle for a long-only, no-money paper account."""
     setup = calculate_trade_setup(df)
     candle_time = str(df.index[-1])
     price = float(setup["entry"])
@@ -2352,6 +2412,7 @@ def run_live_paper_check(df: pd.DataFrame, ticker: str, account: dict) -> dict:
     return account
 
 def load_scanner_account(starting_cash: float, risk_percent: float) -> tuple[dict | None, list[dict]]:
+    """Load the single server-managed scanner account and its recent orders."""
     client = get_supabase_client()
     if client is None:
         return None, []
@@ -2395,6 +2456,7 @@ def save_scanner_account(account: dict, event: dict | None) -> None:
         }).execute()
 
 def scan_and_trade_paper_market(account: dict, interval_key: str, limit: int) -> tuple[dict, pd.DataFrame]:
+    """Scan a capped liquid universe and paper-trade only the best valid setup."""
     candidates = []
     universe = list(SCANNER_UNIVERSE.items())[:limit]
     active_ticker = (account.get("position") or {}).get("ticker")
@@ -2433,6 +2495,11 @@ def scan_and_trade_paper_market(account: dict, interval_key: str, limit: int) ->
 
 def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: float,
                         min_trades: int = 8, max_tests: int | None = None) -> dict:
+    """
+    Grid-Search über EMA/RSI/ATR/Chance-Risiko-Kombinationen.
+    Bewertet wird ausschließlich auf einem Out-of-Sample-Holdout-Zeitraum,
+    damit sich die Auswahl nicht einfach an die Vergangenheit anpasst (Overfitting).
+    """
     grid = {
         "ema_fast": [5, 9, 12],
         "ema_slow": [21, 26, 34],
@@ -2447,6 +2514,8 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
         if combo[0] < combo[1]
     ]
 
+    # Evenly spread a smaller test budget over the entire parameter space
+    # instead of only checking the first combinations in the grid.
     if max_tests is not None and max_tests < len(combos):
         selected_indices = np.linspace(0, len(combos) - 1, max_tests, dtype=int)
         combos = [combos[index] for index in selected_indices]
@@ -2486,7 +2555,7 @@ def optimize_paper_bot(df: pd.DataFrame, initial_capital: float, risk_percent: f
 # ------------------------------------------------------------
 # Lernendes ML-Modell (Gradient Boosting, Walk-Forward-Validierung)
 # ------------------------------------------------------------
-ML_HORIZON = 5
+ML_HORIZON = 5  # Kerzen in die Zukunft, deren Richtung vorhergesagt wird
 
 def build_ml_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     data = df.copy()
@@ -2538,6 +2607,12 @@ def build_ml_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return data, feature_cols
 
 def train_walkforward_ml(df: pd.DataFrame, n_folds: int = 5) -> dict:
+    """
+    Walk-Forward-Validierung: Das Modell wird immer nur auf der Vergangenheit
+    trainiert und auf dem direkt folgenden, ihm unbekannten Abschnitt getestet.
+    So bekommst du eine ehrliche Einschätzung, ob das Modell wirklich etwas
+    "gelernt" hat, statt nur die Vergangenheit auswendig zu kennen.
+    """
     if not SKLEARN_AVAILABLE:
         return {"error": "scikit-learn ist nicht installiert. Bitte 'pip install scikit-learn' ausführen."}
 
@@ -2618,7 +2693,9 @@ def render_ml_predictor():
             return
 
         ml_options = list(ASSETS.keys()) + st.session_state.watchlist
-        ml_asset = st.selectbox("Asset", ml_options, key="ml_asset")
+        ml_asset = searchable_asset_select("Asset", ml_options, key="ml_asset")
+        if ml_asset is None:
+            return
         ml_interval = st.selectbox(
             "Intervall", list(INTERVAL_CONFIG.keys()),
             index=list(INTERVAL_CONFIG.keys()).index("1d"), key="ml_interval",
@@ -2635,6 +2712,8 @@ def render_ml_predictor():
                         feature_df, feature_cols = build_ml_features(ml_df)
                         saved = save_learning_examples(ticker, ml_interval, feature_df, feature_cols)
                         st.info(f"{saved} Trainingsbeispiele aus {ticker} wurden synchronisiert.")
+                        if st.session_state.get("learning_sync_error"):
+                            st.error(f"Fehler beim Speichern: {st.session_state['learning_sync_error']}")
                         status_after = get_learning_status()
                         if status_after["examples"] >= TRAINING_MIN_SAMPLES:
                             result = train_and_maybe_promote_shared_model()
@@ -2664,6 +2743,7 @@ def render_ml_predictor():
                 st.dataframe(importance_df, use_container_width=True, hide_index=True)
                 st.caption("Das System ist weiterhin Paper-Trading/Analyse. Historische Modelltests garantieren keine zukünftigen Ergebnisse.")
 
+
 def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo Finance"):
     try:
         df = load_data(ticker, interval_key, source)
@@ -2672,6 +2752,8 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
     if df.empty or len(df) < 20:
         return None
 
+    # Every analysis enriches the same anonymized, shared market-data pool.
+    # Labels are derived solely from public price candles, never from a user.
     collect_shared_learning(ticker, interval_key, df)
 
     patterns_list = detect_pattern(df)
@@ -2692,19 +2774,131 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
     }
 
 # ------------------------------------------------------------
-# Candlestick-Chart
+# Candlestick-Chart (ohne Nacht-Lücken & mit Zoom-Reset)
 # ------------------------------------------------------------
-JERRY_MASCOT_B64 = "PHN2ZyB3aWR0aD0iMzQwIiBoZWlnaHQ9IjM0MCIgdmlld0JveD0iMCAwIDY4MCA2ODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgcm9sZT0iaW1nIj4KPHRpdGxlPkplcnJ5LCBkZXIgVHJhZGluZy1Cb3Q8L3RpdGxlPgo8ZGVzYz5FaW4gc8O8w59lciwgbMOkY2hlbG5kZXIgcnVuZGVyIFJvYm90ZXIgaW4gVMO8cmtpcyBtaXQgZ3Jvw59lbiBBdWdlbiwgcm90ZW4gV2FuZ2VuIHVuZCBlaW5lciBrbGVpbmVuIEFudGVubmUgbWl0IFN0ZXJuLjwvZGVzYz4KPGNpcmNsZSBjeD0iMzQwIiBjeT0iMzQwIiByPSIzMDAiIGZpbGw9IiMxYTFmMmIiLz4KPGVsbGlwc2UgY3g9IjM0MCIgY3k9IjQ3MCIgcng9IjE1MCIgcnk9IjI2IiBmaWxsPSIjMDAwMDAwIiBvcGFjaXR5PSIwLjE4Ii8+CjxyZWN0IHg9IjMyMCIgeT0iMTUwIiB3aWR0aD0iMTAiIGhlaWdodD0iNzAiIHJ4PSI1IiBmaWxsPSIjN2ZkOGNjIi8+CjxwYXRoIGQ9Ik0zMjUgMTIyIGw0IDEwIGwxMCAxIGwtOCA3IGwzIDEwIGwtOSAtNiBsLTkgNiBsMyAtMTAgbC04IC03IGwxMCAtMSB6IiBmaWxsPSIjZmZkNTRmIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSIjMjZhNjlhIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSJub25lIiBzdHJva2U9IiMxZTg1N2EiIHN0cm9rZS13aWR0aD0iNiIvPgo8ZWxsaXBzZSBjeD0iMjQ1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8ZWxsaXBzZSBjeD0iNDM1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8Y2lyY2xlIGN4PSIyNTUiIGN5PSIzMzAiIHI9IjUyIiBmaWxsPSIjZmZmZmZmIi8+CjxjaXJjbGUgY3g9IjQyNSIgY3k9IzMzMCIgcj0iNTUyIiBmaWxsPSIjZmZmZmZmIi8+CjxjaXJjbGUgY3g9IjI2NiIgY3k9IzMzOCIgcj0iMjQiIGZpbGw9IiMxYTFmMmIiLz4KPGNpcmNsZSBjeD0iNDM2IiBjeT0iMzM4IiByPSIyNCIgZmlsbD0iIzFhMWYyYiIvPgo8Y2lyY2xlIGN4PSIyNzQiIGN5PSIzMjgiIHI9IjgiIGZpbGw9IiNmZmZmZmYiLz4KPHBhdGggZD0iTTI1NSA0MjAgUTM0MCA0ODAgNDI1IDQyMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMWExZjJiIiBzdHJva2Utd2lkdGg9IjEwIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPHJlY3QgeD0iMTIwIiB5PSIzMzAiIHdpZHRoPSIzNCIgaGVpZ2h0PSI3MCIgcng9IjE3IgZmlsbD0iIzFlODU3YSIvPgo8cmVjdCB4PSI1MjYiIHk9IzMzMCIgd2lkdGg9IjM0IiBoZWlnaHQ9Ijc0IiByeD0iMTciIGZpbGw9IiMxZTg1N2EiLz4KPGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMzAwLDQ3MCkiPgo8cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iODAiIGhlaWdodD0iMzQiIHJ4PSI4IiBmaWxsPSIjMGY3NjZlIi8+Cjxwb2x5bGluZSBwb2ludHM9IjEwLDI0IDI0LDEyIDM0LDIwIDQ4LDYgNjAsMTQgNzAsOCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjN2ZmZmQ0IiBzdHJva2Utd2lkdGg9IjQiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgo8L2c+Cjwvc3ZnPgo="
+JERRY_MASCOT_B64 = "PHN2ZyB3aWR0aD0iMzQwIiBoZWlnaHQ9IjM0MCIgdmlld0JveD0iMCAwIDY4MCA2ODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgcm9sZT0iaW1nIj4KPHRpdGxlPkplcnJ5LCBkZXIgVHJhZGluZy1Cb3Q8L3RpdGxlPgo8ZGVzYz5FaW4gc8O8w59lciwgbMOkY2hlbG5kZXIgcnVuZGVyIFJvYm90ZXIgaW4gVMO8cmtpcyBtaXQgZ3Jvw59lbiBBdWdlbiwgcm90ZW4gV2FuZ2VuIHVuZCBlaW5lciBrbGVpbmVuIEFudGVubmUgbWl0IFN0ZXJuLjwvZGVzYz4KPGNpcmNsZSBjeD0iMzQwIiBjeT0iMzQwIiByPSIzMDAiIGZpbGw9IiMxYTFmMmIiLz4KPGVsbGlwc2UgY3g9IjM0MCIgY3k9IjQ3MCIgcng9IjE1MCIgcnk9IjI2IiBmaWxsPSIjMDAwMDAwIiBvcGFjaXR5PSIwLjE4Ii8+CjxyZWN0IHg9IjMyMCIgeT0iMTUwIiB3aWR0aD0iMTAiIGhlaWdodD0iNzAiIHJ4PSI1IiBmaWxsPSIjN2ZkOGNjIi8+CjxwYXRoIGQ9Ik0zMjUgMTIyIGw0IDEwIGwxMCAxIGwtOCA3IGwzIDEwIGwtOSAtNiBsLTkgNiBsMyAtMTAgbC04IC03IGwxMCAtMSB6IiBmaWxsPSIjZmZkNTRmIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSIjMjZhNjlhIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSJub25lIiBzdHJva2U9IiMxZTg1N2EiIHN0cm9rZS13aWR0aD0iNiIvPgo8ZWxsaXBzZSBjeD0iMjQ1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8ZWxsaXBzZSBjeD0iNDM1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8Y2lyY2xlIGN4PSIyNTUiIGN5PSIzMzAiIHI9IjUyIiBmaWxsPSIjZmZmZmZmIi8+CjxjaXJjbGUgY3g9IjQyNSIgY3k9IjMzMCIgcj0iNTIiIGZpbGw9IiNmZmZmZmYiLz4KPGNpcmNsZSBjeD0iMjY2IiBjeT0iMzM4IiByPSIyNCIgZmlsbD0iIzFhMWYyYiIvPgo8Y2lyY2xlIGN4PSI0MzYiIGN5PSIzMzgiIHI9IjI0IiBmaWxsPSIjMWExZjJiIi8+CjxjaXJjbGUgY3g9IjI3NCIgY3k9IjMyOCIgcj0iOCIgZmlsbD0iI2ZmZmZmZiIvPgo8Y2lyY2xlIGN4PSI0NDQiIGN5PSIzMjgiIHI9IjgiIGZpbGw9IiNmZmZmZmYiLz4KPHBhdGggZD0iTTI1NSA0MjAgUTM0MCA0ODAgNDI1IDQyMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMWExZjJiIiBzdHJva2Utd2lkdGg9IjEwIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPHJlY3QgeD0iMTIwIiB5PSIzMzAiIHdpZHRoPSIzNCIgaGVpZ2h0PSI3MCIgcng9IjE3IiBmaWxsPSIjMWU4NTdhIi8+CjxyZWN0IHg9IjUyNiIgeT0iMzMwIiB3aWR0aD0iMzQiIGhlaWdodD0iNzAiIHJ4PSIxNyIgZmlsbD0iIzFlODU3YSIvPgo8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgzMDAsNDcwKSI+CjxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSI4MCIgaGVpZ2h0PSIzNCIgcng9IjgiIGZpbGw9IiMwZjc2NmUiLz4KPHBvbHlsaW5lIHBvaW50cz0iMTAsMjQgMjQsMTIgMzQsMjAgNDgsNiA2MCwxNCA3MCw4IiBmaWxsPSJub25lIiBzdHJva2U9IiM3ZmZmZDQiIHN0cm9rZS13aWR0aD0iNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjwvZz4KPC9zdmc+Cg=="
+
+def render_jerry_widget(mood: str, mood_text: str):
+    """mood: 'idle' | 'buy' | 'win' | 'loss'. Augen folgen dem Mauszeiger,
+    Mund/Farbe/Badge ändern sich je nach Jerrys letzter Handlung."""
+    colors = {
+        "idle": ("#26a69a", "#1e857a"),
+        "buy": ("#29b6a3", "#1e857a"),
+        "win": ("#2ecda0", "#1e9c78"),
+        "loss": ("#4a5568", "#374151"),
+    }
+    body_fill, body_stroke = colors.get(mood, colors["idle"])
+    html = f"""
+    <div style="display:flex;justify-content:center;background:transparent;">
+    <svg id="jerry" width="220" height="220" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
+      <rect x="320" y="150" width="10" height="70" rx="5" fill="#7fd8cc"/>
+      <polygon id="star" points="325,120 333,142 356,143 338,157 344,179 325,166 306,179 312,157 294,143 317,142"
+               fill="#ffd54f"/>
+      <rect x="150" y="210" width="380" height="320" rx="90" fill="{body_fill}" stroke="{body_stroke}" stroke-width="6"/>
+      <ellipse cx="245" cy="380" rx="26" ry="18" fill="#ff8a80" opacity="0.5"/>
+      <ellipse cx="435" cy="380" rx="26" ry="18" fill="#ff8a80" opacity="0.5"/>
+      <circle cx="255" cy="330" r="52" fill="#ffffff"/>
+      <circle cx="425" cy="330" r="52" fill="#ffffff"/>
+      <circle id="pupilL" cx="255" cy="330" r="24" fill="#1a1f2b"/>
+      <circle id="pupilR" cx="425" cy="330" r="24" fill="#1a1f2b"/>
+      <circle cx="263" cy="322" r="8" fill="#ffffff" style="pointer-events:none"/>
+      <circle cx="433" cy="322" r="8" fill="#ffffff" style="pointer-events:none"/>
+      <path id="mouth" d="M255 420 Q340 480 425 420" fill="none" stroke="#1a1f2b" stroke-width="10" stroke-linecap="round"/>
+      <rect x="120" y="330" width="34" height="70" rx="17" fill="{body_stroke}"/>
+      <rect x="526" y="330" width="34" height="70" rx="17" fill="{body_stroke}"/>
+      <g transform="translate(300,470)">
+        <rect width="80" height="34" rx="8" fill="#0f766e"/>
+        <polyline id="badgeLine" points="10,24 24,12 34,20 48,6 60,14 70,8" fill="none"
+                  stroke="#7fffd4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </svg>
+    </div>
+    <p style="text-align:center;color:#aeb8c9;font-size:0.85em;margin-top:0.3em;">{mood_text}</p>
+    <script>
+    (function() {{
+        const svg = document.getElementById('jerry');
+        const pupilL = document.getElementById('pupilL');
+        const pupilR = document.getElementById('pupilR');
+        const eyes = [
+            {{el: pupilL, cx: 255, cy: 330}},
+            {{el: pupilR, cx: 425, cy: 330}},
+        ];
+        const maxOffset = 12;
+        document.addEventListener('mousemove', function(e) {{
+            const rect = svg.getBoundingClientRect();
+            const scale = 680 / rect.width;
+            const mx = (e.clientX - rect.left) * scale;
+            const my = (e.clientY - rect.top) * scale;
+            eyes.forEach(function(eye) {{
+                const dx = mx - eye.cx, dy = my - eye.cy;
+                const dist = Math.min(Math.hypot(dx, dy) / 40, maxOffset);
+                const ang = Math.atan2(dy, dx);
+                eye.el.setAttribute('cx', eye.cx + Math.cos(ang) * dist);
+                eye.el.setAttribute('cy', eye.cy + Math.sin(ang) * dist);
+            }});
+        }});
+
+        const mood = "{mood}";
+        const mouth = document.getElementById('mouth');
+        const star = document.getElementById('star');
+        if (mood === 'win') {{
+            mouth.setAttribute('d', 'M245 415 Q340 495 435 415');
+            star.style.animation = 'spin 1.2s linear infinite';
+            const styleTag = document.createElement('style');
+            styleTag.textContent = '@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }} #star {{ transform-origin: 325px 150px; }}';
+            document.head.appendChild(styleTag);
+        }} else if (mood === 'loss') {{
+            mouth.setAttribute('d', 'M255 445 Q340 405 425 445');
+        }} else if (mood === 'buy') {{
+            mouth.setAttribute('d', 'M270 425 Q340 450 410 425');
+            [pupilL, pupilR].forEach(p => p.setAttribute('r', 20));
+        }}
+    }})();
+    </script>
+    """
+    components.html(html, height=280)
 
 def render_jerry_daytrader():
+    """Jerry: vollautomatischer Day-Trading-Bot. Läuft unabhängig von dieser
+    Streamlit-Seite per GitHub Actions im Hintergrund (siehe jerry_bot.py).
+    Diese Ansicht ist rein informativ -- es gibt bewusst keine manuellen
+    Steuerelemente, Jerry trifft alle Entscheidungen selbst."""
     with st.expander("🐣 Jerry · autonomer Day-Trading-Bot", expanded=True):
+        client = get_supabase_client()
+        if client is None:
+            st.warning("Kein Supabase-Client verfügbar -- Jerrys Status kann gerade nicht geladen werden.")
+            return
+        try:
+            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", "jerry_bot_v1"))
+        except Exception as exc:
+            st.warning(f"Jerrys Status konnte nicht geladen werden: {exc}")
+            return
+
+        orders = []
+        if row:
+            try:
+                orders = (
+                    client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
+                    .eq("account_key", "jerry_bot_v1").order("created_at", desc=True).limit(30).execute().data or []
+                )
+            except Exception:
+                orders = []
+
+        mood, mood_text = "idle", "Ich beobachte den Markt und warte auf ein gutes Signal..."
+        if orders:
+            last = orders[0]
+            if last["action"] == "BUY":
+                mood, mood_text = "buy", f"Gerade eingestiegen bei {last['ticker']}! 🚀"
+            elif last["action"] == "SELL":
+                pnl = float(last.get("pnl") or 0)
+                if pnl > 0:
+                    mood, mood_text = "win", f"Gewinn eingefahren bei {last['ticker']}: +{pnl:.2f} $ 🎉"
+                else:
+                    mood, mood_text = "loss", f"Verlust bei {last['ticker']}: {pnl:.2f} $ — weiter geht's."
+
         col_img, col_info = st.columns([1, 2])
         with col_img:
-            st.markdown(
-                f'<img src="data:image/svg+xml;base64,{JERRY_MASCOT_B64}" '
-                'style="width:100%;max-width:180px;border-radius:16px;" alt="Jerry">',
-                unsafe_allow_html=True,
-            )
+            render_jerry_widget(mood, mood_text)
         with col_info:
             weekday = datetime.now(ZoneInfo("Europe/Berlin")).weekday()
             modus = "Krypto-Modus (Wochenende)" if weekday >= 5 else "Aktien-Modus (Werktag)"
@@ -2716,15 +2910,6 @@ def render_jerry_daytrader():
                 "nach festen Regeln (EMA/RSI/ATR) -- hier gibt es nichts manuell zu bedienen."
             )
 
-        client = get_supabase_client()
-        if client is None:
-            st.warning("Kein Supabase-Client verfügbar -- Jerrys Status kann gerade nicht geladen werden.")
-            return
-        try:
-            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", "jerry_bot_v1"))
-        except Exception as exc:
-            st.warning(f"Jerrys Status konnte nicht geladen werden: {exc}")
-            return
         if not row:
             st.info("Jerry hat noch keinen ersten Lauf hinter sich. Sobald der GitHub-Actions-Cron einmal gelaufen ist, erscheinen hier Kontostand und Trades.")
             return
@@ -2734,14 +2919,6 @@ def render_jerry_daytrader():
         c2.metric("Guthaben (Cash)", f"{float(row['cash']):,.2f} $")
         position = row.get("position")
         c3.metric("Offene Position", position.get("ticker") if position else "Keine")
-
-        try:
-            orders = (
-                client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
-                .eq("account_key", "jerry_bot_v1").order("created_at", desc=True).limit(30).execute().data or []
-            )
-        except Exception:
-            orders = []
 
         st.markdown("**Handelsprotokoll (Zeitstempel, neueste zuerst)**")
         if orders:
@@ -2779,6 +2956,122 @@ def render_risk_disclaimer():
         """,
         unsafe_allow_html=True,
     )
+
+# ------------------------------------------------------------
+# Trend-Fortschreibung (einfache lineare Regression, Linienchart)
+# ------------------------------------------------------------
+def render_trend_forecast_chart(df: pd.DataFrame, ticker: str, lookback: int = 30, forecast_steps: int = 10):
+    closes = df["Close"].tail(lookback).astype(float).values
+    if len(closes) < 5:
+        return
+    x = np.arange(len(closes))
+    slope, intercept = np.polyfit(x, closes, 1)
+    forecast_x = np.arange(len(closes) - 1, len(closes) + forecast_steps)
+    forecast_y = slope * forecast_x + intercept
+
+    trend_color = "#3dd6b0" if slope >= 0 else "#ff6b6b"
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=list(x), y=list(closes), mode="lines", name="Kursverlauf",
+        line=dict(color="#8fa3c8", width=2),
+    ))
+    fig.add_trace(go.Scatter(
+        x=list(forecast_x), y=list(forecast_y), mode="lines", name="Trendfortschreibung",
+        line=dict(color=trend_color, width=2, dash="dash"),
+    ))
+    fig.update_layout(
+        paper_bgcolor="#252b39", plot_bgcolor="#252b39", font=dict(color="#e0e5ef"),
+        margin=dict(l=12, r=12, t=30, b=30), height=260,
+        xaxis=dict(showgrid=False, showticklabels=False, title="Zeit (Kerzen)"),
+        yaxis=dict(showgrid=True, gridcolor="#3b4354", tickfont=dict(color="#b8c2d3")),
+        showlegend=True, legend=dict(orientation="h", y=-0.15),
+    )
+    st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.markdown('</div>', unsafe_allow_html=True)
+    direction = "steigende" if slope >= 0 else "fallende"
+    st.caption(
+        f"Einfache lineare Trendfortschreibung der letzten {lookback} Kerzen, {forecast_steps} Kerzen in die Zukunft "
+        f"verlängert — aktuell {direction} Tendenz. Das ist reine Statistik (Geradengleichung durch die "
+        "Vergangenheit), keine echte Prognose und keine Anlageberatung. Nachrichten, Volumen oder plötzliche "
+        "Ereignisse sind hier nicht berücksichtigt."
+    )
+
+# ------------------------------------------------------------
+# Aktuelle Nachrichten zum Asset (Google News RSS, kein API-Key nötig;
+# optional eigener NewsAPI-Key für mehr Kontrolle)
+# ------------------------------------------------------------
+def fetch_news_google_rss(query: str, max_items: int = 6) -> list[dict]:
+    try:
+        url = "https://news.google.com/rss/search?q=" + urllib.parse.quote(query) + "&hl=de&gl=DE&ceid=DE:de"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = response.read()
+        root = ET.fromstring(data)
+        items = []
+        for item in root.findall(".//item")[:max_items]:
+            source_el = item.find("source")
+            items.append({
+                "title": (item.findtext("title") or "").strip(),
+                "link": (item.findtext("link") or "").strip(),
+                "pubDate": (item.findtext("pubDate") or "").strip(),
+                "source": source_el.text if source_el is not None else "",
+            })
+        return items
+    except Exception:
+        return []
+
+def fetch_news_newsapi(query: str, api_key: str, max_items: int = 6) -> list[dict]:
+    try:
+        params = urllib.parse.urlencode({
+            "q": query, "language": "de", "sortBy": "publishedAt", "pageSize": max_items,
+        })
+        req = urllib.request.Request(
+            f"https://newsapi.org/v2/everything?{params}",
+            headers={"User-Agent": "Mozilla/5.0", "X-Api-Key": api_key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        items = []
+        for article in payload.get("articles", [])[:max_items]:
+            items.append({
+                "title": article.get("title", ""), "link": article.get("url", ""),
+                "pubDate": article.get("publishedAt", ""),
+                "source": (article.get("source") or {}).get("name", ""),
+            })
+        return items
+    except Exception:
+        return []
+
+def render_news_section(query: str):
+    with st.expander("Aktuelle Nachrichten zu diesem Asset", expanded=False):
+        if "news_api_key" not in st.session_state:
+            st.session_state.news_api_key = ""
+        st.session_state.news_api_key = st.text_input(
+            "Eigener NewsAPI-Key (optional)", type="password", value=st.session_state.news_api_key,
+            placeholder="Ohne Key wird automatisch Google News verwendet",
+            key="news_api_key_input",
+            help="newsapi.org bietet einen kostenlosen Key für begrenztes Volumen. Ganz ohne Key funktioniert es über Google News RSS.",
+        )
+        news_items = (
+            fetch_news_newsapi(query, st.session_state.news_api_key, max_items=6)
+            if st.session_state.news_api_key
+            else fetch_news_google_rss(query, max_items=6)
+        )
+        if not news_items:
+            st.caption("Aktuell keine Nachrichten gefunden oder die Quelle war gerade nicht erreichbar.")
+        else:
+            for article in news_items:
+                pub = article["pubDate"][:16].replace("T", " ") if article["pubDate"] else ""
+                st.markdown(
+                    f"**[{article['title']}]({article['link']})**  \n"
+                    f"<span style='color:#8996aa;font-size:0.8em;'>{article['source']} · {pub}</span>",
+                    unsafe_allow_html=True,
+                )
+        st.caption(
+            "Nachrichten dienen nur zur Einordnung und fließen nicht automatisch in die Trend- oder "
+            "Musteranalyse oben ein. Keine Anlageberatung."
+        )
 
 def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_candles: int = 90):
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
@@ -3267,7 +3560,9 @@ def render_paper_bot():
     with st.expander("Paper-Bot trainieren", expanded=False):
         st.caption("Yahoo-Finance-Daten werden in Trainings- und Testabschnitt geteilt. Es werden nur virtuelle Trades simuliert.")
         bot_options = list(ASSETS.keys()) + st.session_state.watchlist
-        bot_asset = st.selectbox("Bot-Asset", bot_options, key="bot_asset")
+        bot_asset = searchable_asset_select("Bot-Asset", bot_options, key="bot_asset")
+        if bot_asset is None:
+            return
         bot_interval = st.selectbox("Bot-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="bot_interval")
         bot_capital, bot_risk = st.columns(2)
         with bot_capital:
@@ -3338,7 +3633,9 @@ def render_paper_bot():
 def render_live_paper_trading():
     with st.expander("Live-Trading (Demo / Paper)", expanded=False):
         st.caption("Simulation mit aktuellen Yahoo-Finance-Kerzen. Es werden keine echten Broker-Orders gesendet und kein echtes Geld bewegt.")
-        live_asset = st.selectbox("Demo-Asset", list(ASSETS.keys()) + st.session_state.watchlist, key="live_asset")
+        live_asset = searchable_asset_select("Demo-Asset", list(ASSETS.keys()) + st.session_state.watchlist, key="live_asset")
+        if live_asset is None:
+            return
         live_interval = st.selectbox("Demo-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="live_interval")
         live_capital, live_risk = st.columns(2)
         with live_capital:
@@ -3389,9 +3686,10 @@ def render_live_paper_trading():
             st.caption("Noch keine Order. Der Bot wartet auf ein Long-Signal nach seiner EMA-/RSI-Regel.")
 
 # ------------------------------------------------------------
-# Live-Scan über das gesamte Universum
+# Live-Scan über das gesamte Universum: stärkste Long-/Short-Muster
 # ------------------------------------------------------------
 def batch_load_ohlc(tickers: list[str], interval_key: str) -> dict[str, pd.DataFrame]:
+    """Lädt mehrere Ticker in einem yfinance-Aufruf statt einzeln (deutlich schneller)."""
     cfg = INTERVAL_CONFIG[interval_key]
     result: dict[str, pd.DataFrame] = {}
     if not tickers:
@@ -3438,6 +3736,12 @@ def scan_extreme_patterns(
     bullish_threshold: float = 70.0, bearish_threshold: float = 30.0,
     min_hits: int = 15, chunk_size: int = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Scannt ein Asset-Universum nach Kerzenmustern mit historisch sehr klarer
+    Richtung. Bullisch = Muster trat historisch in min_hits Fällen auf und
+    führte in >= bullish_threshold % der Fälle zu einem höheren Folgekurs.
+    Bärisch entsprechend <= bearish_threshold %. Keine Anlageberatung.
+    """
     items = list(universe.items())[:scan_limit]
     label_by_ticker = {ticker: label for label, ticker in items}
     tickers = [ticker for _, ticker in items]
@@ -3633,6 +3937,7 @@ def render_extreme_pattern_scanner():
 PORTFOLIO_ACCOUNT_KEY = "autonomous_portfolio_v1"
 
 def load_portfolio_account(account_key: str, starting_cash: float, risk_percent: float) -> tuple[dict | None, list[dict]]:
+    """Lädt ein Multi-Positionen-Konto. 'position' speichert hier eine Liste offener Positionen."""
     client = get_supabase_client()
     if client is None:
         return None, []
@@ -3685,10 +3990,16 @@ def save_portfolio_account(account_key: str, account: dict, events: list[dict]) 
 def run_autonomous_portfolio_scan(
     account: dict, interval_key: str, scan_limit: int, max_positions: int,
 ) -> tuple[dict, pd.DataFrame]:
+    """
+    Prüft bestehende Positionen auf Stop/Ziel/Trendwechsel und eröffnet neue
+    Positionen (bis max_positions) für die besten aktuell erkannten Long-Setups.
+    Läuft komplett eigenständig — keine manuelle Auswahl nötig.
+    """
     events: list[dict] = []
     positions = account["positions"]
     held_tickers = {p["ticker"] for p in positions}
 
+    # 1) Bestehende Positionen prüfen (Exit-Logik)
     if held_tickers:
         held_data = batch_load_ohlc(list(held_tickers), interval_key)
         still_open = []
@@ -3696,7 +4007,7 @@ def run_autonomous_portfolio_scan(
             ticker = position["ticker"]
             df = held_data.get(ticker)
             if df is None or df.empty:
-                still_open.append(position)
+                still_open.append(position)  # Daten gerade nicht verfügbar: Position unangetastet lassen
                 continue
             setup = calculate_trade_setup(df)
             price = float(setup["entry"])
@@ -3721,6 +4032,7 @@ def run_autonomous_portfolio_scan(
         positions = still_open
         held_tickers = {p["ticker"] for p in positions}
 
+    # 2) Neue Kandidaten suchen, solange Plätze frei sind
     candidates_rows: list[dict] = []
     free_slots = max_positions - len(positions)
     if free_slots > 0 and account["cash"] > 1.0:
@@ -3997,95 +4309,32 @@ elif _bot_section == "Extreme-Pattern-Scanner":
 else:
     render_ml_predictor()
 
-# ============================================================
-# Hilfsfunktionen für Tab 1 (Trend & News)
-# ============================================================
-def render_trend_forecast_chart(df: pd.DataFrame, ticker: str):
-    close = df["Close"]
-    sma20 = close.rolling(20).mean()
-    last_close = close.iloc[-1]
-    last_sma = sma20.iloc[-1] if not sma20.empty else last_close
-    
-    delta = ((last_close / last_sma) - 1) * 100 if last_sma else 0
-    trend_str = "Aufwärtstrend" if last_close > last_sma else "Abwärtstrend"
-    
-    st.info(f"**Trend-Tendenz ({ticker}):** Der Kurs liegt aktuell {abs(delta):.1f}% {'über' if last_close > last_sma else 'unter'} dem 20er-Schnitt ({trend_str}).")
-
-def render_news_section(query: str):
-    st.caption(f"ℹ️ Aktuelle Markt-News zu **{query}** können über eine externe API eingebunden werden.")
-
-# ============================================================
+# ------------------------------------------------------------
 # Tabs: Einzelanalyse vs. Meine Positionen
-# ============================================================
+# ------------------------------------------------------------
 tab1, tab2 = st.tabs(["Einzelanalyse", "Meine Positionen"])
 
 # ============================================================
 # TAB 1 – Einzelanalyse
 # ============================================================
 with tab1:
-    st.markdown('<div class="section-label">Assets auswählen</div>', unsafe_allow_html=True)
-    
+    st.markdown('<div class="section-label">Asset</div>', unsafe_allow_html=True)
     combined_options = list(ASSETS.keys()) + st.session_state.watchlist
-    
     asset_search = st.text_input(
-        "Assets durchsuchen / filtern", 
-        key="single_asset_search", 
-        placeholder="z.B. BTC, AAPL, Tesla, S&P 500...",
+        "Asset suchen", key="single_asset_search", placeholder="z.B. AAPL oder Apple",
+        label_visibility="collapsed",
     )
-    
     if asset_search.strip():
         needle = asset_search.strip().upper()
-        filtered_options = [name for name in combined_options if needle in name.upper()]
+        filtered_combined = [name for name in combined_options if needle in name.upper()]
     else:
-        filtered_options = combined_options
-
-    if not filtered_options:
-        st.caption("Keine passenden Assets gefunden.")
-        filtered_options = combined_options
-
-    selected_assets = st.multiselect(
-        "Wähle ein oder mehrere Assets für die Analyse:",
-        options=filtered_options,
-        default=[filtered_options[0]] if filtered_options else [],
-        key="single_assets_multi",
-        help="Du kannst mehrere Assets auswählen, um sie nacheinander in der Einzelanalyse auszuwerten."
-    )
-
-    st.markdown('<div class="section-label">Positionen per CSV importieren</div>', unsafe_allow_html=True)
-    st.caption("Lade eine CSV-Datei hoch, um Positionen direkt zur Auswahl/Watchlist hinzuzufügen.")
-    csv_file = st.file_uploader("CSV-Datei hochladen", type=["csv"], key="csv_file_single")
-
-    if csv_file is not None:
-        try:
-            csv_df = pd.read_csv(csv_file)
-        except Exception:
-            csv_file.seek(0)
-            csv_df = pd.read_csv(io.StringIO(csv_file.getvalue().decode("utf-8", errors="ignore")), sep=";")
-
-        st.dataframe(csv_df.head(10), use_container_width=True, height=150)
-
-        ticker_col = None
-        for candidate in ["Ticker", "ticker", "Symbol", "symbol", "TICKER"]:
-            if candidate in csv_df.columns:
-                ticker_col = candidate
-                break
-
-        if ticker_col is None:
-            ticker_col = st.selectbox(
-                "Welche Spalte enthält die Ticker-Symbole?", csv_df.columns.tolist(), key="csv_ticker_col_single"
-            )
-
-        if st.button("Aus CSV zur Auswahl hinzufügen", key="import_csv_single_btn"):
-            new_tickers = (
-                csv_df[ticker_col].dropna().astype(str).str.strip().str.upper().unique().tolist()
-            )
-            added_count = 0
-            for t in new_tickers:
-                if t and t not in st.session_state.watchlist:
-                    st.session_state.watchlist.append(t)
-                    added_count += 1
-            st.success(f"{added_count} neue Ticker zur Auswahl hinzugefügt.")
-            st.rerun()
+        filtered_combined = combined_options
+    if not filtered_combined:
+        st.caption("Kein Treffer für diese Suche.")
+        filtered_combined = combined_options
+    if st.session_state.get("single_asset") not in filtered_combined:
+        st.session_state["single_asset"] = filtered_combined[0]
+    asset_choice = st.selectbox("Asset wählen", filtered_combined, label_visibility="collapsed", key="single_asset")
 
     st.markdown('<div class="section-label">Zeitrahmen (Kerzen-Intervall)</div>', unsafe_allow_html=True)
     interval_label = st.selectbox(
@@ -4098,63 +4347,58 @@ with tab1:
 
     button_left, button_center, button_right = st.columns([1, 2, 1])
     with button_center:
-        run = st.button("Analyse starten", key="single_run", use_container_width=True)
+        run = st.button("Chart analysieren", key="single_run", use_container_width=True)
 
     if run:
-        if not selected_assets:
-            st.warning("Bitte wähle mindestens ein Asset aus.")
+        ticker = ASSETS.get(asset_choice) or asset_choice
+
+        with st.spinner("Lade Kursdaten..."):
+            try:
+                st.session_state.single_result = analyze_ticker(ticker, interval_label, data_source)
+            except Exception as error:
+                st.session_state.single_result = None
+                st.error(str(error))
+            st.session_state.single_ai_text = None
+            st.session_state.single_ai_key = None
+
+        if st.session_state.single_result is None:
+            st.error("Nicht genügend Kursdaten gefunden. Bitte anderes Asset/Intervall wählen.")
+
+    result = st.session_state.single_result
+    if result is not None:
+        render_result_card(
+            result["ticker"], result["pattern"], result["probability"],
+            result["hits"], len(result["df"]), interval_label,
+        )
+        render_trade_setup(result["trade_setup"], result["ticker"], interval_label)
+        render_candlestick_chart(result["df"], result["pattern"], result["ticker"])
+
+        st.markdown('<div class="section-label">Trend-Fortschreibung</div>', unsafe_allow_html=True)
+        render_trend_forecast_chart(result["df"], result["ticker"])
+
+        news_query = asset_choice.split(" (")[0]
+        render_news_section(news_query)
+
+        provider_key = {
+            "Gemini": st.session_state.gemini_api_key,
+            "OpenAI": st.session_state.openai_api_key,
+            "Claude": st.session_state.anthropic_api_key,
+        }.get(ai_provider, "")
+        if ai_provider != "Keiner" and provider_key:
+            st.caption("Die KI ist optional und wird nur nach Klick auf den folgenden Button angefragt.")
+            if st.button("KI-Einschätzung laden", key=f"single_ai_{result['ticker']}"):
+                with st.spinner(f"{ai_provider} erstellt eine kurze Einschätzung..."):
+                    st.session_state.single_ai_text = get_ai_analysis(
+                        ai_provider, provider_key, result["ticker"], result["pattern"],
+                        result["probability"], result["df"],
+                    )
+            if st.session_state.single_ai_text:
+                st.markdown(
+                    f'<div class="ai-card"><div class="ai-label">KI-Einschätzung</div>{st.session_state.single_ai_text.replace(chr(10), "<br>")}</div>',
+                    unsafe_allow_html=True,
+                )
         else:
-            st.session_state.single_results_list = []
-            for asset_item in selected_assets:
-                ticker = ASSETS.get(asset_item) or asset_item
-                with st.spinner(f"Lade Kursdaten für {asset_item}..."):
-                    try:
-                        res = analyze_ticker(ticker, interval_label, data_source)
-                        if res:
-                            res["label_name"] = asset_item
-                            st.session_state.single_results_list.append(res)
-                        else:
-                            st.warning(f"Keine Daten für {asset_item} gefunden.")
-                    except Exception as error:
-                        st.error(f"Fehler bei {asset_item}: {error}")
-
-    # Ergebnisse anzeigen
-    results_list = st.session_state.get("single_results_list", [])
-    if results_list:
-        for result in results_list:
-            st.markdown("---")
-            st.subheader(f"📊 Analyse: {result.get('label_name', result['ticker'])}")
-            
-            render_result_card(
-                result["ticker"], result["pattern"], result["probability"],
-                result["hits"], len(result["df"]), interval_label,
-            )
-            render_trade_setup(result["trade_setup"], result["ticker"], interval_label)
-            render_candlestick_chart(result["df"], result["pattern"], result["ticker"])
-
-            st.markdown('<div class="section-label">Trend-Fortschreibung</div>', unsafe_allow_html=True)
-            render_trend_forecast_chart(result["df"], result["ticker"])
-
-            news_query = result.get('label_name', result['ticker']).split(" (")[0]
-            render_news_section(news_query)
-
-            provider_key = {
-                "Gemini": st.session_state.gemini_api_key,
-                "OpenAI": st.session_state.openai_api_key,
-                "Claude": st.session_state.anthropic_api_key,
-            }.get(ai_provider, "")
-            
-            if ai_provider != "Keiner" and provider_key:
-                if st.button(f"KI-Einschätzung für {result['ticker']} laden", key=f"single_ai_{result['ticker']}"):
-                    with st.spinner(f"{ai_provider} erstellt eine kurze Einschätzung..."):
-                        ai_text = get_ai_analysis(
-                            ai_provider, provider_key, result["ticker"], result["pattern"],
-                            result["probability"], result["df"],
-                        )
-                        st.markdown(
-                            f'<div class="ai-card"><div class="ai-label">KI-Einschätzung</div>{ai_text.replace(chr(10), "<br>")}</div>',
-                            unsafe_allow_html=True,
-                        )
+            st.caption("Wähle oben einen KI-Anbieter und hinterlege den passenden API-Key für eine optionale Einschätzung.")
 
         st.markdown(
             '<div class="disclaimer">Keine Anlageberatung. Rein statistische/historische '
@@ -4163,14 +4407,16 @@ with tab1:
         )
 
 # ============================================================
-# TAB 2 – Meine Positionen (Watchlist)
+# TAB 2 – Meine Positionen (Watchlist + CSV-Import)
 # ============================================================
 with tab2:
     st.markdown(
         """
         <div class="info-card">
-        Hier findest du deine gespeicherten Watchlist-Positionen.
-        Füge manuell Symbole hinzu oder nutze den Import im Tab Einzelanalyse.
+        Trade Republic bietet keine offizielle Schnittstelle für Drittanbieter-Logins –
+        ein direkter Login mit deinem TR-Passwort in einer fremden App wäre nicht sicher.
+        Trag deine Positionen stattdessen hier ein (manuell oder per CSV),
+        die Kurse holt sich die App automatisch über Yahoo Finance.
         </div>
         """,
         unsafe_allow_html=True,
@@ -4208,6 +4454,48 @@ with tab2:
             st.session_state.watchlist = [t for t in st.session_state.watchlist if t not in remove_choice]
             st.rerun()
 
+    st.markdown('<div class="section-label">Positionen per CSV importieren</div>', unsafe_allow_html=True)
+    st.caption(
+        "Lade eine CSV-Datei mit deinen Positionen hoch (z.B. selbst exportiert oder "
+        "abgetippt). Erwartet wird mindestens eine Spalte mit dem Ticker-Symbol."
+    )
+    csv_file = st.file_uploader("CSV-Datei", type=["csv"], label_visibility="collapsed")
+
+    if csv_file is not None:
+        try:
+            csv_df = pd.read_csv(csv_file)
+        except Exception:
+            csv_file.seek(0)
+            csv_df = pd.read_csv(io.StringIO(csv_file.getvalue().decode("utf-8", errors="ignore")), sep=";")
+
+        st.dataframe(csv_df.head(20), use_container_width=True, height=180)
+
+        ticker_col = None
+        for candidate in ["Ticker", "ticker", "Symbol", "symbol", "TICKER"]:
+            if candidate in csv_df.columns:
+                ticker_col = candidate
+                break
+
+        if ticker_col is None:
+            ticker_col = st.selectbox(
+                "Welche Spalte enthält den Ticker?", csv_df.columns.tolist(), key="csv_ticker_col",
+            )
+        else:
+            st.caption(f"Ticker-Spalte automatisch erkannt: **{ticker_col}**")
+
+        if st.button("Aus CSV in Watchlist übernehmen", key="import_csv_btn"):
+            new_tickers = (
+                csv_df[ticker_col].dropna().astype(str).str.strip().str.upper().unique().tolist()
+            )
+            added = 0
+            for t in new_tickers:
+                if t and t not in st.session_state.watchlist:
+                    st.session_state.watchlist.append(t)
+                    added += 1
+            st.success(f"{added} neue Ticker zur Watchlist hinzugefügt.")
+            st.rerun()
+
+    if st.session_state.watchlist:
         st.markdown('<div class="section-label">Alle Positionen analysieren</div>', unsafe_allow_html=True)
         batch_interval = st.selectbox(
             "Zeitrahmen für alle",
@@ -4220,6 +4508,21 @@ with tab2:
         analyze_all = st.button("Alle analysieren", key="analyze_all_btn")
         st.markdown('</div>', unsafe_allow_html=True)
 
+        batch_provider_key = {
+            "Gemini": st.session_state.gemini_api_key,
+            "OpenAI": st.session_state.openai_api_key,
+            "Claude": st.session_state.anthropic_api_key,
+        }.get(ai_provider, "")
+        use_ai_batch = st.checkbox(
+            "KI-Einschätzungen für alle Ticker anfordern",
+            value=False,
+            disabled=not bool(batch_provider_key) or ai_provider == "Keiner",
+            key="use_ai_batch",
+            help="Verbraucht eine Gemini-Anfrage pro erfolgreich geladenem Ticker.",
+        )
+        if not batch_provider_key or ai_provider == "Keiner":
+            st.caption("Wähle oben einen KI-Anbieter und hinterlege den passenden API-Key für KI-Einschätzungen.")
+
         if analyze_all:
             progress = st.progress(0.0, text="Starte Analyse...")
             results = []
@@ -4231,11 +4534,17 @@ with tab2:
                     st.warning(f"{t}: {error}")
                     res = None
                 if res:
+                    if batch_provider_key and ai_provider != "Keiner" and use_ai_batch:
+                        res["ai_text"] = get_ai_analysis(
+                            ai_provider, batch_provider_key, t, res["pattern"], res["probability"], res["df"]
+                        )
+                    else:
+                        res["ai_text"] = None
                     results.append(res)
             progress.empty()
 
             if not results:
-                st.error("Für keinen deiner Ticker konnten Daten geladen werden.")
+                st.error("Für keinen deiner Ticker konnten Daten geladen werden. Bitte Symbole prüfen.")
             else:
                 for res in sorted(
                     results,
@@ -4244,5 +4553,18 @@ with tab2:
                 ):
                     render_mini_card(res["ticker"], res["pattern"], res["probability"])
                     render_candlestick_chart(res["df"], res["pattern"], res["ticker"], n_candles=25)
+                    if res["ai_text"]:
+                        ai_html = res["ai_text"].replace(chr(10), "<br>")
+                        st.markdown(
+                            f'<div class="ai-card" style="margin-top:-0.3em;">'
+                            f'<div class="ai-label">{res["ticker"]}</div>{ai_html}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown(
+                    '<div class="disclaimer">Keine Anlageberatung. Rein statistische/historische '
+                    'Auswertung, keine Garantie für zukünftige Kursbewegungen.</div>',
+                    unsafe_allow_html=True,
+                )
     else:
         st.caption("Noch keine Positionen in der Watchlist.")
