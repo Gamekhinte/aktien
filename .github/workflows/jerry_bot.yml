@@ -1,0 +1,29 @@
+name: Jerry Day-Trading-Bot
+
+on:
+  schedule:
+    # Alle 15 Minuten, rund um die Uhr (GitHub Actions Cron nutzt UTC).
+    # Läuft technisch auch außerhalb der Handelszeiten -- das Skript selbst
+    # entscheidet je nach Marktdaten, ob es etwas zu tun gibt.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}  # erlaubt manuelles Starten über den "Run workflow"-Button auf GitHub
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance supabase
+
+      - name: Jerry handelt
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: python jerry_bot.py
