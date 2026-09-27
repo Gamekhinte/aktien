@@ -1,12 +1,10 @@
-name: Jerry Day-Trading-Bot
+name: Jerry (grün, Minuten-Trader)
 
 on:
   schedule:
     # Alle 15 Minuten, rund um die Uhr (GitHub Actions Cron nutzt UTC).
-    # Läuft technisch auch außerhalb der Handelszeiten -- das Skript selbst
-    # entscheidet je nach Marktdaten, ob es etwas zu tun gibt.
     - cron: "*/15 * * * *"
-  workflow_dispatch: {}  # erlaubt manuelles Starten über den "Run workflow"-Button auf GitHub
+  workflow_dispatch: {}
 
 jobs:
   trade:
