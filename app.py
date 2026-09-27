@@ -651,6 +651,66 @@ SCANNER_UNIVERSE["Yum! Brands"] = "YUM"
 SCANNER_UNIVERSE["Zimmer Biomet"] = "ZBH"
 SCANNER_UNIVERSE["Zebra Technologies"] = "ZBRA"
 SCANNER_UNIVERSE["Zoetis"] = "ZTS"
+# --- Weitere etablierte Nasdaq/US-Werte ---
+SCANNER_UNIVERSE["Meta Platforms"] = "META"
+SCANNER_UNIVERSE["Alphabet (A)"] = "GOOGL"
+SCANNER_UNIVERSE["Microsoft"] = "MSFT"
+SCANNER_UNIVERSE["NVIDIA"] = "NVDA"
+SCANNER_UNIVERSE["Tesla"] = "TSLA"
+SCANNER_UNIVERSE["Netflix"] = "NFLX"
+SCANNER_UNIVERSE["PayPal"] = "PYPL"
+SCANNER_UNIVERSE["Uber"] = "UBER"
+SCANNER_UNIVERSE["Shopify"] = "SHOP"
+SCANNER_UNIVERSE["Palantir"] = "PLTR"
+SCANNER_UNIVERSE["Coinbase"] = "COIN"
+SCANNER_UNIVERSE["MicroStrategy"] = "MSTR"
+SCANNER_UNIVERSE["Block (Square)"] = "SQ"
+SCANNER_UNIVERSE["Snowflake"] = "SNOW"
+SCANNER_UNIVERSE["CrowdStrike"] = "CRWD"
+SCANNER_UNIVERSE["Datadog"] = "DDOG"
+SCANNER_UNIVERSE["MongoDB"] = "MDB"
+SCANNER_UNIVERSE["ASML"] = "ASML"
+SCANNER_UNIVERSE["Taiwan Semiconductor"] = "TSM"
+SCANNER_UNIVERSE["Broadcom"] = "AVGO"
+SCANNER_UNIVERSE["Qualcomm"] = "QCOM"
+SCANNER_UNIVERSE["Intel"] = "INTC"
+SCANNER_UNIVERSE["Micron"] = "MU"
+SCANNER_UNIVERSE["Super Micro Computer"] = "SMCI"
+SCANNER_UNIVERSE["Arm Holdings"] = "ARM"
+# --- Deutsche / europäische Blue Chips (DAX u.a.) ---
+SCANNER_UNIVERSE["SAP"] = "SAP.DE"
+SCANNER_UNIVERSE["Siemens"] = "SIE.DE"
+SCANNER_UNIVERSE["Volkswagen"] = "VOW3.DE"
+SCANNER_UNIVERSE["Mercedes-Benz"] = "MBG.DE"
+SCANNER_UNIVERSE["BMW"] = "BMW.DE"
+SCANNER_UNIVERSE["Allianz"] = "ALV.DE"
+SCANNER_UNIVERSE["Deutsche Bank"] = "DBK.DE"
+SCANNER_UNIVERSE["Deutsche Telekom"] = "DTE.DE"
+SCANNER_UNIVERSE["Adidas"] = "ADS.DE"
+SCANNER_UNIVERSE["Airbus"] = "AIR.PA"
+SCANNER_UNIVERSE["LVMH"] = "MC.PA"
+SCANNER_UNIVERSE["Novo Nordisk"] = "NVO"
+SCANNER_UNIVERSE["ASM International"] = "ASM.AS"
+# --- Weitere etablierte Krypto-Projekte (Top ~100, keine Low-Cap-Meme-Coins) ---
+SCANNER_UNIVERSE["Toncoin"] = "TON-USD"
+SCANNER_UNIVERSE["Sui"] = "SUI-USD"
+SCANNER_UNIVERSE["Aptos"] = "APT-USD"
+SCANNER_UNIVERSE["Bitcoin SV"] = "BSV-USD"
+SCANNER_UNIVERSE["Klaytn"] = "KLAY-USD"
+SCANNER_UNIVERSE["Fetch.ai"] = "FET-USD"
+SCANNER_UNIVERSE["Immutable X"] = "IMX-USD"
+SCANNER_UNIVERSE["Axie Infinity"] = "AXS-USD"
+SCANNER_UNIVERSE["Helium"] = "HNT-USD"
+SCANNER_UNIVERSE["Rocket Pool"] = "RPL-USD"
+SCANNER_UNIVERSE["Frax Share"] = "FXS-USD"
+SCANNER_UNIVERSE["Ravencoin"] = "RVN-USD"
+SCANNER_UNIVERSE["Chia"] = "XCH-USD"
+SCANNER_UNIVERSE["Nano"] = "XNO-USD"
+SCANNER_UNIVERSE["Celo"] = "CELO-USD"
+SCANNER_UNIVERSE["Harmony"] = "ONE-USD"
+SCANNER_UNIVERSE["ICON"] = "ICX-USD"
+SCANNER_UNIVERSE["Terra Classic"] = "LUNC-USD"
+SCANNER_UNIVERSE["Wrapped Bitcoin"] = "WBTC-USD"
 
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
@@ -1232,6 +1292,22 @@ st.markdown(
     }
 
     .disclaimer { font-size: 0.74em; color: #8996aa; margin-top: 1.6em; text-align: center; }
+    @media (max-width: 480px) {
+        div[data-testid="stHorizontalBlock"] {
+            flex-direction: column !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            width: 100% !important;
+            min-width: 100% !important;
+            margin-bottom: 0.5em;
+        }
+        div[data-testid="stMetric"] {
+            background: #1e2432;
+            border-radius: 10px;
+            padding: 0.5em 0.7em;
+        }
+        .block-container { padding-left: 0.8em; padding-right: 0.8em; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -2393,7 +2469,7 @@ def train_walkforward_ml(df: pd.DataFrame, n_folds: int = 5) -> dict:
     }
 
 def render_ml_predictor():
-    with st.expander("KI-Prognose (gemeinsames lernendes Modell)", expanded=False):
+    with st.expander("KI-Prognose (gemeinsames lernendes Modell)", expanded=True):
         st.caption(
             "Das Modell sammelt aus den Paper-Analysen gemeinsame Trainingsbeispiele in Supabase. "
             "Neue Modelle werden per Walk-Forward validiert und nur übernommen, wenn sie das aktive Modell nicht verschlechtern."
@@ -2491,9 +2567,27 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
 # ------------------------------------------------------------
 # Candlestick-Chart (ohne Nacht-Lücken & mit Zoom-Reset)
 # ------------------------------------------------------------
-def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_candles: int = 40):
+def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_candles: int = 90):
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-    plot_df = df.tail(n_candles).copy().reset_index(drop=True)
+
+    is_intraday_data = pd.api.types.is_datetime64_any_dtype(df["Date"]) and bool(
+        (pd.to_datetime(df["Date"]).dt.hour != 0).any() or (pd.to_datetime(df["Date"]).dt.minute != 0).any()
+    )
+    base_df = df.copy()
+    if not is_intraday_data and len(df) > 30:
+        timeframe = st.radio(
+            "Zeitraster", ["Tag", "Woche"], horizontal=True,
+            key=f"tf_{ticker}_{id(df)}", label_visibility="collapsed",
+        )
+        if timeframe == "Woche":
+            w = base_df.set_index(pd.to_datetime(base_df["Date"])).resample("W").agg({
+                "Open": "first", "High": "max", "Low": "min", "Close": "last",
+                **({"Volume": "sum"} if "Volume" in base_df.columns else {}),
+            }).dropna(subset=["Open"]).reset_index()
+            base_df = w
+            n_candles = max(n_candles, 60)
+
+    plot_df = base_df.tail(n_candles).copy().reset_index(drop=True)
 
     if pd.api.types.is_datetime64_any_dtype(plot_df["Date"]):
         dates = pd.to_datetime(plot_df["Date"])
@@ -3200,7 +3294,7 @@ if _HAS_FRAGMENT:
         st.caption(f"Zuletzt automatisch aktualisiert: {st.session_state.extreme_scanned_at} Uhr (alle 5 Minuten, nur solange dieser Tab offen ist)")
 
 def render_extreme_pattern_scanner():
-    with st.expander("Live-Scan: stärkste Long- & Short-Muster (S&P 500 + Top-Kryptos)", expanded=False):
+    with st.expander("Live-Scan: stärkste Long- & Short-Muster (S&P 500 + Top-Kryptos)", expanded=True):
         st.caption(
             f"Durchsucht bis zu {len(SCANNER_UNIVERSE)} der bekanntesten Aktien (alle aktuellen S&P-500-Mitglieder) "
             "und größten Kryptowährungen nach Kerzenmustern mit historisch sehr eindeutiger Richtung. "
@@ -3418,7 +3512,7 @@ def run_autonomous_portfolio_scan(
     return account, pd.DataFrame(candidates_rows)
 
 def render_autonomous_portfolio_bot():
-    with st.expander("Autonomer Portfolio-Bot · handelt selbstständig über mehrere Assets", expanded=False):
+    with st.expander("Autonomer Portfolio-Bot · handelt selbstständig über mehrere Assets", expanded=True):
         st.caption(
             "Dieser Bot verwaltet ein gemeinsames, in Supabase gespeichertes Demo-Portfolio ohne echtes Geld. "
             "Er prüft bestehende Positionen auf Stop-Loss/Take-Profit/Trendwechsel und eröffnet eigenständig neue "
@@ -3544,7 +3638,7 @@ def render_autonomous_portfolio_bot():
         )
 
 def render_market_scanner_paper_bot():
-    with st.expander("Markt-Scanner · gemeinsamer Demo-Bot", expanded=False):
+    with st.expander("Markt-Scanner · gemeinsamer Demo-Bot", expanded=True):
         st.caption("Ein gemeinsames, in Supabase gespeichertes Paper-Konto. Der Scanner bewertet liquide Aktien, ETFs und Krypto und eröffnet höchstens eine Long-Position. Keine echten Orders.")
         scanner_interval = st.selectbox("Scanner-Intervall", ["1h", "1d"], index=1, key="scanner_interval")
         scanner_limit = st.slider("Assets pro Scan", min_value=3, max_value=len(SCANNER_UNIVERSE), value=10, key="scanner_limit")
@@ -3611,10 +3705,25 @@ def render_market_scanner_paper_bot():
             except Exception:
                 st.warning("Chart konnte gerade nicht geladen werden.")
 
-render_market_scanner_paper_bot()
-render_autonomous_portfolio_bot()
-render_extreme_pattern_scanner()
-render_ml_predictor()
+st.markdown('<div class="section-label">Bereich</div>', unsafe_allow_html=True)
+_bot_section = st.selectbox(
+    "Bereich wählen", label_visibility="collapsed",
+    options=[
+        "Markt-Scanner (Demo-Bot)",
+        "Autonomer Portfolio-Bot",
+        "Extreme-Pattern-Scanner",
+        "KI-Prognose (lernendes Modell)",
+    ],
+    key="top_bot_section",
+)
+if _bot_section == "Markt-Scanner (Demo-Bot)":
+    render_market_scanner_paper_bot()
+elif _bot_section == "Autonomer Portfolio-Bot":
+    render_autonomous_portfolio_bot()
+elif _bot_section == "Extreme-Pattern-Scanner":
+    render_extreme_pattern_scanner()
+else:
+    render_ml_predictor()
 
 # ------------------------------------------------------------
 # Tabs: Einzelanalyse vs. Meine Positionen
