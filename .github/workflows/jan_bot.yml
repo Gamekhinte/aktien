@@ -1,0 +1,27 @@
+name: Jan (gelb, Stunden-Trader)
+
+on:
+  schedule:
+    # Alle 3 Stunden.
+    - cron: "0 */3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas numpy yfinance supabase
+
+      - name: Jan handelt
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: python jan_bot.py
