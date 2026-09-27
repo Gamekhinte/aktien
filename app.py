@@ -1626,6 +1626,25 @@ with st.expander("Marktdatenquelle", expanded=False):
 # ------------------------------------------------------------
 # Daten laden
 # ------------------------------------------------------------
+def searchable_asset_select(
+    label: str, options: list[str], key: str,
+    placeholder: str = "z.B. AAPL oder Apple", label_visibility: str = "visible",
+) -> str | None:
+    """Selectbox mit vorgeschalteter Text-Suche, für Listen mit sehr vielen Assets."""
+    search_key = f"{key}__search"
+    search_value = st.text_input(f"{label} suchen", key=search_key, placeholder=placeholder, label_visibility="collapsed" if label_visibility == "collapsed" else "visible")
+    if search_value.strip():
+        needle = search_value.strip().upper()
+        filtered = [name for name in options if needle in name.upper()]
+    else:
+        filtered = options
+    if not filtered:
+        st.caption("Kein Treffer für diese Suche.")
+        return None
+    if st.session_state.get(key) not in filtered:
+        st.session_state[key] = filtered[0]
+    return st.selectbox(label, filtered, key=key, label_visibility=label_visibility)
+
 def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> pd.DataFrame:
     if source == "Interactive Brokers Paper-Feed":
         feed = st.session_state.get("ibkr_feed")
@@ -2672,7 +2691,9 @@ def render_ml_predictor():
             return
 
         ml_options = list(ASSETS.keys()) + st.session_state.watchlist
-        ml_asset = st.selectbox("Asset", ml_options, key="ml_asset")
+        ml_asset = searchable_asset_select("Asset", ml_options, key="ml_asset")
+        if ml_asset is None:
+            return
         ml_interval = st.selectbox(
             "Intervall", list(INTERVAL_CONFIG.keys()),
             index=list(INTERVAL_CONFIG.keys()).index("1d"), key="ml_interval",
@@ -3421,7 +3442,9 @@ def render_paper_bot():
     with st.expander("Paper-Bot trainieren", expanded=False):
         st.caption("Yahoo-Finance-Daten werden in Trainings- und Testabschnitt geteilt. Es werden nur virtuelle Trades simuliert.")
         bot_options = list(ASSETS.keys()) + st.session_state.watchlist
-        bot_asset = st.selectbox("Bot-Asset", bot_options, key="bot_asset")
+        bot_asset = searchable_asset_select("Bot-Asset", bot_options, key="bot_asset")
+        if bot_asset is None:
+            return
         bot_interval = st.selectbox("Bot-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="bot_interval")
         bot_capital, bot_risk = st.columns(2)
         with bot_capital:
@@ -3492,7 +3515,9 @@ def render_paper_bot():
 def render_live_paper_trading():
     with st.expander("Live-Trading (Demo / Paper)", expanded=False):
         st.caption("Simulation mit aktuellen Yahoo-Finance-Kerzen. Es werden keine echten Broker-Orders gesendet und kein echtes Geld bewegt.")
-        live_asset = st.selectbox("Demo-Asset", list(ASSETS.keys()) + st.session_state.watchlist, key="live_asset")
+        live_asset = searchable_asset_select("Demo-Asset", list(ASSETS.keys()) + st.session_state.watchlist, key="live_asset")
+        if live_asset is None:
+            return
         live_interval = st.selectbox("Demo-Intervall", list(INTERVAL_CONFIG.keys()), index=list(INTERVAL_CONFIG.keys()).index("1d"), key="live_interval")
         live_capital, live_risk = st.columns(2)
         with live_capital:
@@ -4177,7 +4202,21 @@ tab1, tab2 = st.tabs(["Einzelanalyse", "Meine Positionen"])
 with tab1:
     st.markdown('<div class="section-label">Asset</div>', unsafe_allow_html=True)
     combined_options = list(ASSETS.keys()) + st.session_state.watchlist
-    asset_choice = st.selectbox("Asset wählen", combined_options, label_visibility="collapsed", key="single_asset")
+    asset_search = st.text_input(
+        "Asset suchen", key="single_asset_search", placeholder="z.B. AAPL oder Apple",
+        label_visibility="collapsed",
+    )
+    if asset_search.strip():
+        needle = asset_search.strip().upper()
+        filtered_combined = [name for name in combined_options if needle in name.upper()]
+    else:
+        filtered_combined = combined_options
+    if not filtered_combined:
+        st.caption("Kein Treffer für diese Suche.")
+        filtered_combined = combined_options
+    if st.session_state.get("single_asset") not in filtered_combined:
+        st.session_state["single_asset"] = filtered_combined[0]
+    asset_choice = st.selectbox("Asset wählen", filtered_combined, label_visibility="collapsed", key="single_asset")
 
     st.markdown('<div class="section-label">Zeitrahmen (Kerzen-Intervall)</div>', unsafe_allow_html=True)
     interval_label = st.selectbox(
