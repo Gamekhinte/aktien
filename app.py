@@ -3277,8 +3277,16 @@ def scan_extreme_patterns(
     )
     return bullish_df, bearish_df
 
-def _run_and_store_extreme_scan(interval_key: str, limit: int) -> None:
-    bullish_df, bearish_df = scan_extreme_patterns(SCANNER_UNIVERSE, interval_key, limit)
+def _filter_universe_by_class(universe: dict[str, str], asset_class: str) -> dict[str, str]:
+    if asset_class == "Nur Krypto":
+        return {label: ticker for label, ticker in universe.items() if ticker.endswith("-USD")}
+    if asset_class == "Nur Aktien":
+        return {label: ticker for label, ticker in universe.items() if not ticker.endswith("-USD")}
+    return universe
+
+def _run_and_store_extreme_scan(interval_key: str, limit: int, asset_class: str = "Alle") -> None:
+    universe = _filter_universe_by_class(SCANNER_UNIVERSE, asset_class)
+    bullish_df, bearish_df = scan_extreme_patterns(universe, interval_key, limit)
     st.session_state.extreme_bullish = bullish_df
     st.session_state.extreme_bearish = bearish_df
     st.session_state.extreme_scanned_at = datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y %H:%M:%S")
@@ -3289,8 +3297,9 @@ if _HAS_FRAGMENT:
     def _extreme_scan_autorefresh_fragment():
         interval_key = st.session_state.get("extreme_interval", "1d")
         limit = st.session_state.get("extreme_limit", 120)
+        asset_class = st.session_state.get("extreme_asset_class", "Alle")
         with st.spinner(f"Automatischer Scan über {limit} Assets läuft..."):
-            _run_and_store_extreme_scan(interval_key, limit)
+            _run_and_store_extreme_scan(interval_key, limit, asset_class)
         st.caption(f"Zuletzt automatisch aktualisiert: {st.session_state.extreme_scanned_at} Uhr (alle 5 Minuten, nur solange dieser Tab offen ist)")
 
 def render_extreme_pattern_scanner():
@@ -3300,13 +3309,23 @@ def render_extreme_pattern_scanner():
             "und größten Kryptowährungen nach Kerzenmustern mit historisch sehr eindeutiger Richtung. "
             "Kein echter Live-Tick-Feed: Basis sind abgeschlossene Kerzen von Yahoo Finance, die periodisch neu geladen werden."
         )
+        extreme_asset_class = st.radio(
+            "Asset-Klasse", ["Alle", "Nur Aktien", "Nur Krypto"],
+            horizontal=True, key="extreme_asset_class",
+        )
+        filtered_universe = _filter_universe_by_class(SCANNER_UNIVERSE, extreme_asset_class)
         col_a, col_b, col_c = st.columns(3)
         with col_a:
             extreme_interval = st.selectbox("Intervall", ["1h", "1d"], index=1, key="extreme_interval")
         with col_b:
+            _uni_size = max(len(filtered_universe), 1)
+            _min_scan = 1 if _uni_size < 20 else 20
+            if _min_scan >= _uni_size:
+                _min_scan = max(1, _uni_size - 1)
             extreme_limit = st.slider(
-                "Anzahl gescannter Assets", min_value=20, max_value=len(SCANNER_UNIVERSE),
-                value=min(120, len(SCANNER_UNIVERSE)), step=10, key="extreme_limit",
+                "Anzahl gescannter Assets", min_value=_min_scan,
+                max_value=_uni_size,
+                value=min(120, _uni_size), step=10 if _uni_size >= 20 else 1, key="extreme_limit",
             )
         with col_c:
             auto_refresh = st.checkbox(
@@ -3315,7 +3334,7 @@ def render_extreme_pattern_scanner():
                 disabled=not _HAS_FRAGMENT,
             )
         st.caption(
-            f"Ein manueller Scan über {extreme_limit} Assets dauert grob "
+            f"Ein manueller Scan über {extreme_limit} Assets ({extreme_asset_class.lower()}) dauert grob "
             f"{max(1, extreme_limit // 100)}–{max(2, extreme_limit // 40)} Minute(n), abhängig von Yahoo Finance. "
             "Für ständige Überwachung aller ~600 Assets in echter Echtzeit bräuchte es einen bezahlten Marktdaten-Feed "
             "und einen dauerhaft laufenden Server statt einer kostenlosen Streamlit-App."
@@ -3327,7 +3346,7 @@ def render_extreme_pattern_scanner():
             _extreme_scan_autorefresh_fragment()
         elif st.button("Jetzt scannen", key="run_extreme_scan"):
             with st.spinner(f"Scanne {extreme_limit} Assets..."):
-                _run_and_store_extreme_scan(extreme_interval, extreme_limit)
+                _run_and_store_extreme_scan(extreme_interval, extreme_limit, extreme_asset_class)
 
         scanned_at = st.session_state.get("extreme_scanned_at")
         if scanned_at:
