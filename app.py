@@ -2145,7 +2145,8 @@ def load_scanner_account(starting_cash: float, risk_percent: float) -> tuple[dic
         }
         orders = client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason").eq("account_key", SCANNER_ACCOUNT_KEY).order("created_at", desc=True).limit(50).execute().data or []
         return account, orders
-    except Exception:
+    except Exception as exc:
+        st.session_state["portfolio_load_error"] = f"[scanner] {type(exc).__name__}: {exc}"
         return None, []
 
 def save_scanner_account(account: dict, event: dict | None) -> None:
@@ -3269,7 +3270,8 @@ def load_portfolio_account(account_key: str, starting_cash: float, risk_percent:
             .eq("account_key", account_key).order("created_at", desc=True).limit(50).execute().data or []
         )
         return account, orders
-    except Exception:
+    except Exception as exc:
+        st.session_state["portfolio_load_error"] = f"[portfolio-bot] {type(exc).__name__}: {exc}"
         return None, []
 
 def save_portfolio_account(account_key: str, account: dict, events: list[dict]) -> None:
@@ -3460,6 +3462,8 @@ def render_autonomous_portfolio_bot():
         account, orders = load_portfolio_account(PORTFOLIO_ACCOUNT_KEY, float(portfolio_cash), float(portfolio_risk))
         if account is None:
             st.warning("Der Portfolio-Bot braucht die Supabase-Secrets und die Scanner-Tabellen (siehe oben im Markt-Scanner).")
+            if st.session_state.get("portfolio_load_error"):
+                st.code(st.session_state["portfolio_load_error"])
             return
 
         last_run = st.session_state.get("portfolio_last_run")
