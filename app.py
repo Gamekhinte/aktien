@@ -944,10 +944,14 @@ def save_learning_examples(symbol: str, interval_key: str, feature_df: pd.DataFr
     usable = feature_df.dropna(subset=feature_cols + ["target"]).copy()
     if usable.empty:
         return 0
+    if "Date" not in usable.columns:
+        st.session_state.learning_sync_error = "Feature-DataFrame enthält keine 'Date'-Spalte."
+        return 0
 
     rows = []
-    for idx, row in usable.iterrows():
-        timestamp = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
+    for _, row in usable.iterrows():
+        ts = row["Date"]
+        timestamp = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
         features = {name: float(row[name]) for name in feature_cols}
         future_return = row.get("future_return")
         rows.append({
@@ -1510,6 +1514,7 @@ ASSETS = {
     "Apple (AAPL)": "AAPL",
     "Tesla (TSLA)": "TSLA",
     "Nvidia (NVDA)": "NVDA",
+    **SCANNER_UNIVERSE,
 }
 
 INTERVAL_CONFIG = {
@@ -2684,6 +2689,8 @@ def render_ml_predictor():
                         feature_df, feature_cols = build_ml_features(ml_df)
                         saved = save_learning_examples(ticker, ml_interval, feature_df, feature_cols)
                         st.info(f"{saved} Trainingsbeispiele aus {ticker} wurden synchronisiert.")
+                        if st.session_state.get("learning_sync_error"):
+                            st.error(f"Fehler beim Speichern: {st.session_state['learning_sync_error']}")
                         status_after = get_learning_status()
                         if status_after["examples"] >= TRAINING_MIN_SAMPLES:
                             result = train_and_maybe_promote_shared_model()
