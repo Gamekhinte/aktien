@@ -2745,6 +2745,96 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
 # ------------------------------------------------------------
 # Candlestick-Chart (ohne Nacht-Lücken & mit Zoom-Reset)
 # ------------------------------------------------------------
+JERRY_MASCOT_B64 = "PHN2ZyB3aWR0aD0iMzQwIiBoZWlnaHQ9IjM0MCIgdmlld0JveD0iMCAwIDY4MCA2ODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgcm9sZT0iaW1nIj4KPHRpdGxlPkplcnJ5LCBkZXIgVHJhZGluZy1Cb3Q8L3RpdGxlPgo8ZGVzYz5FaW4gc8O8w59lciwgbMOkY2hlbG5kZXIgcnVuZGVyIFJvYm90ZXIgaW4gVMO8cmtpcyBtaXQgZ3Jvw59lbiBBdWdlbiwgcm90ZW4gV2FuZ2VuIHVuZCBlaW5lciBrbGVpbmVuIEFudGVubmUgbWl0IFN0ZXJuLjwvZGVzYz4KPGNpcmNsZSBjeD0iMzQwIiBjeT0iMzQwIiByPSIzMDAiIGZpbGw9IiMxYTFmMmIiLz4KPGVsbGlwc2UgY3g9IjM0MCIgY3k9IjQ3MCIgcng9IjE1MCIgcnk9IjI2IiBmaWxsPSIjMDAwMDAwIiBvcGFjaXR5PSIwLjE4Ii8+CjxyZWN0IHg9IjMyMCIgeT0iMTUwIiB3aWR0aD0iMTAiIGhlaWdodD0iNzAiIHJ4PSI1IiBmaWxsPSIjN2ZkOGNjIi8+CjxwYXRoIGQ9Ik0zMjUgMTIyIGw0IDEwIGwxMCAxIGwtOCA3IGwzIDEwIGwtOSAtNiBsLTkgNiBsMyAtMTAgbC04IC03IGwxMCAtMSB6IiBmaWxsPSIjZmZkNTRmIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSIjMjZhNjlhIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSJub25lIiBzdHJva2U9IiMxZTg1N2EiIHN0cm9rZS13aWR0aD0iNiIvPgo8ZWxsaXBzZSBjeD0iMjQ1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8ZWxsaXBzZSBjeD0iNDM1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8Y2lyY2xlIGN4PSIyNTUiIGN5PSIzMzAiIHI9IjUyIiBmaWxsPSIjZmZmZmZmIi8+CjxjaXJjbGUgY3g9IjQyNSIgY3k9IjMzMCIgcj0iNTIiIGZpbGw9IiNmZmZmZmYiLz4KPGNpcmNsZSBjeD0iMjY2IiBjeT0iMzM4IiByPSIyNCIgZmlsbD0iIzFhMWYyYiIvPgo8Y2lyY2xlIGN4PSI0MzYiIGN5PSIzMzgiIHI9IjI0IiBmaWxsPSIjMWExZjJiIi8+CjxjaXJjbGUgY3g9IjI3NCIgY3k9IjMyOCIgcj0iOCIgZmlsbD0iI2ZmZmZmZiIvPgo8Y2lyY2xlIGN4PSI0NDQiIGN5PSIzMjgiIHI9IjgiIGZpbGw9IiNmZmZmZmYiLz4KPHBhdGggZD0iTTI1NSA0MjAgUTM0MCA0ODAgNDI1IDQyMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMWExZjJiIiBzdHJva2Utd2lkdGg9IjEwIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPHJlY3QgeD0iMTIwIiB5PSIzMzAiIHdpZHRoPSIzNCIgaGVpZ2h0PSI3MCIgcng9IjE3IiBmaWxsPSIjMWU4NTdhIi8+CjxyZWN0IHg9IjUyNiIgeT0iMzMwIiB3aWR0aD0iMzQiIGhlaWdodD0iNzAiIHJ4PSIxNyIgZmlsbD0iIzFlODU3YSIvPgo8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgzMDAsNDcwKSI+CjxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSI4MCIgaGVpZ2h0PSIzNCIgcng9IjgiIGZpbGw9IiMwZjc2NmUiLz4KPHBvbHlsaW5lIHBvaW50cz0iMTAsMjQgMjQsMTIgMzQsMjAgNDgsNiA2MCwxNCA3MCw4IiBmaWxsPSJub25lIiBzdHJva2U9IiM3ZmZmZDQiIHN0cm9rZS13aWR0aD0iNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjwvZz4KPC9zdmc+Cg=="
+
+def render_jerry_daytrader():
+    """Jerry: vollautomatischer Day-Trading-Bot. Läuft unabhängig von dieser
+    Streamlit-Seite per GitHub Actions im Hintergrund (siehe jerry_bot.py).
+    Diese Ansicht ist rein informativ -- es gibt bewusst keine manuellen
+    Steuerelemente, Jerry trifft alle Entscheidungen selbst."""
+    with st.expander("🐣 Jerry · autonomer Day-Trading-Bot", expanded=True):
+        col_img, col_info = st.columns([1, 2])
+        with col_img:
+            st.markdown(
+                f'<img src="data:image/svg+xml;base64,{JERRY_MASCOT_B64}" '
+                'style="width:100%;max-width:180px;border-radius:16px;" alt="Jerry">',
+                unsafe_allow_html=True,
+            )
+        with col_info:
+            weekday = datetime.now(ZoneInfo("Europe/Berlin")).weekday()
+            modus = "Krypto-Modus (Wochenende)" if weekday >= 5 else "Aktien-Modus (Werktag)"
+            st.markdown(f"**Hallo, ich bin Jerry! 👋** Aktueller Modus: **{modus}**")
+            st.caption(
+                "Ich handle rund um die Uhr selbstständig im Hintergrund über GitHub Actions -- "
+                "auch wenn niemand diese Seite geöffnet hat. Am Wochenende fokussiere ich mich auf "
+                "Krypto, unter der Woche auf Aktien. Alle Entscheidungen treffe ich eigenständig "
+                "nach festen Regeln (EMA/RSI/ATR) -- hier gibt es nichts manuell zu bedienen."
+            )
+
+        client = get_supabase_client()
+        if client is None:
+            st.warning("Kein Supabase-Client verfügbar -- Jerrys Status kann gerade nicht geladen werden.")
+            return
+        try:
+            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", "jerry_bot_v1"))
+        except Exception as exc:
+            st.warning(f"Jerrys Status konnte nicht geladen werden: {exc}")
+            return
+        if not row:
+            st.info("Jerry hat noch keinen ersten Lauf hinter sich. Sobald der GitHub-Actions-Cron einmal gelaufen ist, erscheinen hier Kontostand und Trades.")
+            return
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Kontowert", f"{float(row['equity']):,.2f} $")
+        c2.metric("Guthaben (Cash)", f"{float(row['cash']):,.2f} $")
+        position = row.get("position")
+        c3.metric("Offene Position", position.get("ticker") if position else "Keine")
+
+        try:
+            orders = (
+                client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
+                .eq("account_key", "jerry_bot_v1").order("created_at", desc=True).limit(30).execute().data or []
+            )
+        except Exception:
+            orders = []
+
+        st.markdown("**Handelsprotokoll (Zeitstempel, neueste zuerst)**")
+        if orders:
+            orders_df = pd.DataFrame(orders).rename(columns={
+                "created_at": "Zeitstempel", "action": "Aktion", "ticker": "Asset",
+                "price": "Preis", "units": "Menge", "pnl": "Ergebnis", "reason": "Begründung",
+            })
+            st.dataframe(orders_df, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Noch keine Trades protokolliert.")
+        render_risk_disclaimer()
+
+def render_risk_disclaimer():
+    st.markdown(
+        """
+        <div style="margin-top:1.4em; padding:0.9em 1.1em; border:1px solid #3b4354;
+                    border-radius:10px; background:#1a1f2b; font-size:0.78em;
+                    line-height:1.5; color:#aeb8c9;">
+        <strong style="color:#e0e5ef;">⚠️ Risikohinweis</strong><br>
+        Alle Inhalte dieser App dienen ausschließlich der allgemeinen Information und
+        stellen <strong>keine Anlageberatung, keine Finanzanalyse und keine Kauf- oder
+        Verkaufsempfehlung</strong> im Sinne des Wertpapierhandelsgesetzes dar. Es handelt
+        sich um automatisiert erzeugte, rein statistische Auswertungen historischer
+        Kursdaten. <strong>Historische Ergebnisse (Trefferquoten, Backtests, Muster) sind
+        keine Garantie oder Indikation für zukünftige Kursentwicklungen.</strong><br><br>
+        Der Handel mit Aktien, Kryptowährungen und anderen Finanzinstrumenten ist mit
+        erheblichen Risiken verbunden und kann bis zum <strong>Totalverlust des
+        eingesetzten Kapitals</strong> führen. Kryptowährungen unterliegen zudem
+        besonders hoher Volatilität und weitgehend fehlender Regulierung. Treffen Sie
+        keine Anlageentscheidungen allein auf Basis der hier dargestellten Daten;
+        ziehen Sie bei Bedarf eine unabhängige, lizenzierte Finanzberatung hinzu.<br><br>
+        Der Betreiber dieser App übernimmt keine Haftung für Verluste, die aus der
+        Nutzung dieser Informationen entstehen.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def render_candlestick_chart(df: pd.DataFrame, pattern: str, ticker: str, n_candles: int = 90):
     st.markdown('<div class="chart-card">', unsafe_allow_html=True)
 
@@ -3414,6 +3504,14 @@ def scan_extreme_patterns(
     label_by_ticker = {ticker: label for label, ticker in items}
     tickers = [ticker for _, ticker in items]
 
+    btc_change_pct = None
+    try:
+        btc_df = load_data("BTC-USD", interval_key, "Yahoo Finance")
+        if len(btc_df) >= 6:
+            btc_change_pct = (btc_df["Close"].iloc[-1] / btc_df["Close"].iloc[-6] - 1) * 100
+    except Exception:
+        btc_change_pct = None
+
     bullish_rows: list[dict] = []
     bearish_rows: list[dict] = []
 
@@ -3430,6 +3528,18 @@ def scan_extreme_patterns(
                     probability, hits = historical_probability(df, pattern)
                     if probability is None or hits < min_hits:
                         continue
+                    try:
+                        setup = calculate_trade_setup(df)
+                        stop_loss = round(float(setup["stop"]), 4)
+                        take_profit = round(float(setup["target"]), 4)
+                    except Exception:
+                        stop_loss = take_profit = None
+                    vergleich = "–"
+                    if btc_change_pct is not None and len(df) >= 6 and ticker != "BTC-USD":
+                        asset_change_pct = (df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1) * 100
+                        delta = asset_change_pct - btc_change_pct
+                        arrow = "▲" if delta > 0 else "▼" if delta < 0 else "→"
+                        vergleich = f"{arrow} {delta:+.1f}% vs. BTC"
                     row = {
                         "Asset": label_by_ticker.get(ticker, ticker),
                         "Ticker": ticker,
@@ -3437,6 +3547,9 @@ def scan_extreme_patterns(
                         "Trefferquote %": probability,
                         "Vergleichsfälle": hits,
                         "Letzter Kurs": round(last_close, 4),
+                        "Stop-Loss": stop_loss,
+                        "Take-Profit": take_profit,
+                        "Vergleich": vergleich,
                     }
                     if probability >= bullish_threshold:
                         bullish_rows.append(row)
@@ -3533,15 +3646,43 @@ def render_extreme_pattern_scanner():
         bullish_df = st.session_state.get("extreme_bullish")
         bearish_df = st.session_state.get("extreme_bearish")
 
-        st.markdown("**📈 Stärkste Long-Signale (historisch sehr häufig danach gestiegen)**")
+        _trefferquote_help = (
+            "Basiert auf historischem Backtest: wie oft dieses Muster in der Vergangenheit "
+            "zu einer Bewegung in die angezeigte Richtung führte. Keine Prognose, keine Garantie."
+        )
+        _col_config = {
+            "Trefferquote %": st.column_config.NumberColumn("Trefferquote %", help=_trefferquote_help, format="%.1f%%"),
+            "Stop-Loss": st.column_config.NumberColumn("Stop-Loss", format="%.4f"),
+            "Take-Profit": st.column_config.NumberColumn("Take-Profit", format="%.4f"),
+        }
+
+        st.markdown(
+            '<div style="border-left:4px solid #26a69a; background:rgba(38,166,154,0.08); '
+            'border-radius:6px; padding:0.5em 0.9em; margin-top:0.8em;">'
+            '<span style="color:#26a69a; font-weight:700;">📈 LONG</span> '
+            '<span style="color:#e0e5ef;">— stärkste bullische Signale</span></div>',
+            unsafe_allow_html=True,
+        )
         if bullish_df is not None and not bullish_df.empty:
-            st.dataframe(bullish_df.head(15), use_container_width=True, hide_index=True)
+            st.dataframe(
+                bullish_df.head(15), use_container_width=True, hide_index=True,
+                column_config=_col_config,
+            )
         else:
             st.caption("Noch kein Scan oder aktuell kein Asset mit ≥70% historischer Trefferquote bei mind. 15 Vergleichsfällen.")
 
-        st.markdown("**📉 Stärkste Short-Signale (historisch sehr häufig danach gefallen)**")
+        st.markdown(
+            '<div style="border-left:4px solid #ef5350; background:rgba(239,83,80,0.08); '
+            'border-radius:6px; padding:0.5em 0.9em; margin-top:1.2em;">'
+            '<span style="color:#ef5350; font-weight:700;">📉 SHORT</span> '
+            '<span style="color:#e0e5ef;">— stärkste bärische Signale</span></div>',
+            unsafe_allow_html=True,
+        )
         if bearish_df is not None and not bearish_df.empty:
-            st.dataframe(bearish_df.head(15), use_container_width=True, hide_index=True)
+            st.dataframe(
+                bearish_df.head(15), use_container_width=True, hide_index=True,
+                column_config=_col_config,
+            )
         else:
             st.caption("Noch kein Scan oder aktuell kein Asset mit ≤30% historischer Trefferquote bei mind. 15 Vergleichsfällen.")
 
@@ -3549,6 +3690,7 @@ def render_extreme_pattern_scanner():
             "Keine Anlageberatung. Eine hohe historische Trefferquote ist keine Garantie für die Zukunft — "
             "Stichprobengröße, veränderte Marktbedingungen, Gebühren und Slippage sind hier nicht eingepreist."
         )
+        render_risk_disclaimer()
 
 PORTFOLIO_ACCOUNT_KEY = "autonomous_portfolio_v1"
 
@@ -3906,6 +4048,7 @@ st.markdown('<div class="section-label">Bereich</div>', unsafe_allow_html=True)
 _bot_section = st.selectbox(
     "Bereich wählen", label_visibility="collapsed",
     options=[
+        "Jerry (autonomer Day-Trader)",
         "Markt-Scanner (Demo-Bot)",
         "Autonomer Portfolio-Bot",
         "Extreme-Pattern-Scanner",
@@ -3913,7 +4056,9 @@ _bot_section = st.selectbox(
     ],
     key="top_bot_section",
 )
-if _bot_section == "Markt-Scanner (Demo-Bot)":
+if _bot_section == "Jerry (autonomer Day-Trader)":
+    render_jerry_daytrader()
+elif _bot_section == "Markt-Scanner (Demo-Bot)":
     render_market_scanner_paper_bot()
 elif _bot_section == "Autonomer Portfolio-Bot":
     render_autonomous_portfolio_bot()
