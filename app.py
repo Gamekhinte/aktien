@@ -15,6 +15,7 @@
 # ============================================================
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -2747,19 +2748,127 @@ def analyze_ticker(ticker: str, interval_key: str = "1d", source: str = "Yahoo F
 # ------------------------------------------------------------
 JERRY_MASCOT_B64 = "PHN2ZyB3aWR0aD0iMzQwIiBoZWlnaHQ9IjM0MCIgdmlld0JveD0iMCAwIDY4MCA2ODAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgcm9sZT0iaW1nIj4KPHRpdGxlPkplcnJ5LCBkZXIgVHJhZGluZy1Cb3Q8L3RpdGxlPgo8ZGVzYz5FaW4gc8O8w59lciwgbMOkY2hlbG5kZXIgcnVuZGVyIFJvYm90ZXIgaW4gVMO8cmtpcyBtaXQgZ3Jvw59lbiBBdWdlbiwgcm90ZW4gV2FuZ2VuIHVuZCBlaW5lciBrbGVpbmVuIEFudGVubmUgbWl0IFN0ZXJuLjwvZGVzYz4KPGNpcmNsZSBjeD0iMzQwIiBjeT0iMzQwIiByPSIzMDAiIGZpbGw9IiMxYTFmMmIiLz4KPGVsbGlwc2UgY3g9IjM0MCIgY3k9IjQ3MCIgcng9IjE1MCIgcnk9IjI2IiBmaWxsPSIjMDAwMDAwIiBvcGFjaXR5PSIwLjE4Ii8+CjxyZWN0IHg9IjMyMCIgeT0iMTUwIiB3aWR0aD0iMTAiIGhlaWdodD0iNzAiIHJ4PSI1IiBmaWxsPSIjN2ZkOGNjIi8+CjxwYXRoIGQ9Ik0zMjUgMTIyIGw0IDEwIGwxMCAxIGwtOCA3IGwzIDEwIGwtOSAtNiBsLTkgNiBsMyAtMTAgbC04IC03IGwxMCAtMSB6IiBmaWxsPSIjZmZkNTRmIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSIjMjZhNjlhIi8+CjxyZWN0IHg9IjE1MCIgeT0iMjEwIiB3aWR0aD0iMzgwIiBoZWlnaHQ9IjMyMCIgcng9IjkwIiBmaWxsPSJub25lIiBzdHJva2U9IiMxZTg1N2EiIHN0cm9rZS13aWR0aD0iNiIvPgo8ZWxsaXBzZSBjeD0iMjQ1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8ZWxsaXBzZSBjeD0iNDM1IiBjeT0iMzgwIiByeD0iMjYiIHJ5PSIxOCIgZmlsbD0iI2ZmOGE4MCIgb3BhY2l0eT0iMC41NSIvPgo8Y2lyY2xlIGN4PSIyNTUiIGN5PSIzMzAiIHI9IjUyIiBmaWxsPSIjZmZmZmZmIi8+CjxjaXJjbGUgY3g9IjQyNSIgY3k9IjMzMCIgcj0iNTIiIGZpbGw9IiNmZmZmZmYiLz4KPGNpcmNsZSBjeD0iMjY2IiBjeT0iMzM4IiByPSIyNCIgZmlsbD0iIzFhMWYyYiIvPgo8Y2lyY2xlIGN4PSI0MzYiIGN5PSIzMzgiIHI9IjI0IiBmaWxsPSIjMWExZjJiIi8+CjxjaXJjbGUgY3g9IjI3NCIgY3k9IjMyOCIgcj0iOCIgZmlsbD0iI2ZmZmZmZiIvPgo8Y2lyY2xlIGN4PSI0NDQiIGN5PSIzMjgiIHI9IjgiIGZpbGw9IiNmZmZmZmYiLz4KPHBhdGggZD0iTTI1NSA0MjAgUTM0MCA0ODAgNDI1IDQyMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMWExZjJiIiBzdHJva2Utd2lkdGg9IjEwIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KPHJlY3QgeD0iMTIwIiB5PSIzMzAiIHdpZHRoPSIzNCIgaGVpZ2h0PSI3MCIgcng9IjE3IiBmaWxsPSIjMWU4NTdhIi8+CjxyZWN0IHg9IjUyNiIgeT0iMzMwIiB3aWR0aD0iMzQiIGhlaWdodD0iNzAiIHJ4PSIxNyIgZmlsbD0iIzFlODU3YSIvPgo8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgzMDAsNDcwKSI+CjxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSI4MCIgaGVpZ2h0PSIzNCIgcng9IjgiIGZpbGw9IiMwZjc2NmUiLz4KPHBvbHlsaW5lIHBvaW50cz0iMTAsMjQgMjQsMTIgMzQsMjAgNDgsNiA2MCwxNCA3MCw4IiBmaWxsPSJub25lIiBzdHJva2U9IiM3ZmZmZDQiIHN0cm9rZS13aWR0aD0iNCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+CjwvZz4KPC9zdmc+Cg=="
 
+def render_jerry_widget(mood: str, mood_text: str):
+    """mood: 'idle' | 'buy' | 'win' | 'loss'. Augen folgen dem Mauszeiger,
+    Mund/Farbe/Badge ändern sich je nach Jerrys letzter Handlung."""
+    colors = {
+        "idle": ("#26a69a", "#1e857a"),
+        "buy": ("#29b6a3", "#1e857a"),
+        "win": ("#2ecda0", "#1e9c78"),
+        "loss": ("#4a5568", "#374151"),
+    }
+    body_fill, body_stroke = colors.get(mood, colors["idle"])
+    html = f"""
+    <div style="display:flex;justify-content:center;background:transparent;">
+    <svg id="jerry" width="220" height="220" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
+      <rect x="320" y="150" width="10" height="70" rx="5" fill="#7fd8cc"/>
+      <polygon id="star" points="325,120 333,142 356,143 338,157 344,179 325,166 306,179 312,157 294,143 317,142"
+               fill="#ffd54f"/>
+      <rect x="150" y="210" width="380" height="320" rx="90" fill="{body_fill}" stroke="{body_stroke}" stroke-width="6"/>
+      <ellipse cx="245" cy="380" rx="26" ry="18" fill="#ff8a80" opacity="0.5"/>
+      <ellipse cx="435" cy="380" rx="26" ry="18" fill="#ff8a80" opacity="0.5"/>
+      <circle cx="255" cy="330" r="52" fill="#ffffff"/>
+      <circle cx="425" cy="330" r="52" fill="#ffffff"/>
+      <circle id="pupilL" cx="255" cy="330" r="24" fill="#1a1f2b"/>
+      <circle id="pupilR" cx="425" cy="330" r="24" fill="#1a1f2b"/>
+      <circle cx="263" cy="322" r="8" fill="#ffffff" style="pointer-events:none"/>
+      <circle cx="433" cy="322" r="8" fill="#ffffff" style="pointer-events:none"/>
+      <path id="mouth" d="M255 420 Q340 480 425 420" fill="none" stroke="#1a1f2b" stroke-width="10" stroke-linecap="round"/>
+      <rect x="120" y="330" width="34" height="70" rx="17" fill="{body_stroke}"/>
+      <rect x="526" y="330" width="34" height="70" rx="17" fill="{body_stroke}"/>
+      <g transform="translate(300,470)">
+        <rect width="80" height="34" rx="8" fill="#0f766e"/>
+        <polyline id="badgeLine" points="10,24 24,12 34,20 48,6 60,14 70,8" fill="none"
+                  stroke="#7fffd4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </svg>
+    </div>
+    <p style="text-align:center;color:#aeb8c9;font-size:0.85em;margin-top:0.3em;">{mood_text}</p>
+    <script>
+    (function() {{
+        const svg = document.getElementById('jerry');
+        const pupilL = document.getElementById('pupilL');
+        const pupilR = document.getElementById('pupilR');
+        const eyes = [
+            {{el: pupilL, cx: 255, cy: 330}},
+            {{el: pupilR, cx: 425, cy: 330}},
+        ];
+        const maxOffset = 12;
+        document.addEventListener('mousemove', function(e) {{
+            const rect = svg.getBoundingClientRect();
+            const scale = 680 / rect.width;
+            const mx = (e.clientX - rect.left) * scale;
+            const my = (e.clientY - rect.top) * scale;
+            eyes.forEach(function(eye) {{
+                const dx = mx - eye.cx, dy = my - eye.cy;
+                const dist = Math.min(Math.hypot(dx, dy) / 40, maxOffset);
+                const ang = Math.atan2(dy, dx);
+                eye.el.setAttribute('cx', eye.cx + Math.cos(ang) * dist);
+                eye.el.setAttribute('cy', eye.cy + Math.sin(ang) * dist);
+            }});
+        }});
+
+        const mood = "{mood}";
+        const mouth = document.getElementById('mouth');
+        const star = document.getElementById('star');
+        if (mood === 'win') {{
+            mouth.setAttribute('d', 'M245 415 Q340 495 435 415');
+            star.style.animation = 'spin 1.2s linear infinite';
+            const styleTag = document.createElement('style');
+            styleTag.textContent = '@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }} #star {{ transform-origin: 325px 150px; }}';
+            document.head.appendChild(styleTag);
+        }} else if (mood === 'loss') {{
+            mouth.setAttribute('d', 'M255 445 Q340 405 425 445');
+        }} else if (mood === 'buy') {{
+            mouth.setAttribute('d', 'M270 425 Q340 450 410 425');
+            [pupilL, pupilR].forEach(p => p.setAttribute('r', 20));
+        }}
+    }})();
+    </script>
+    """
+    components.html(html, height=280)
+
 def render_jerry_daytrader():
     """Jerry: vollautomatischer Day-Trading-Bot. Läuft unabhängig von dieser
     Streamlit-Seite per GitHub Actions im Hintergrund (siehe jerry_bot.py).
     Diese Ansicht ist rein informativ -- es gibt bewusst keine manuellen
     Steuerelemente, Jerry trifft alle Entscheidungen selbst."""
     with st.expander("🐣 Jerry · autonomer Day-Trading-Bot", expanded=True):
+        client = get_supabase_client()
+        if client is None:
+            st.warning("Kein Supabase-Client verfügbar -- Jerrys Status kann gerade nicht geladen werden.")
+            return
+        try:
+            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", "jerry_bot_v1"))
+        except Exception as exc:
+            st.warning(f"Jerrys Status konnte nicht geladen werden: {exc}")
+            return
+
+        orders = []
+        if row:
+            try:
+                orders = (
+                    client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
+                    .eq("account_key", "jerry_bot_v1").order("created_at", desc=True).limit(30).execute().data or []
+                )
+            except Exception:
+                orders = []
+
+        mood, mood_text = "idle", "Ich beobachte den Markt und warte auf ein gutes Signal..."
+        if orders:
+            last = orders[0]
+            if last["action"] == "BUY":
+                mood, mood_text = "buy", f"Gerade eingestiegen bei {last['ticker']}! 🚀"
+            elif last["action"] == "SELL":
+                pnl = float(last.get("pnl") or 0)
+                if pnl > 0:
+                    mood, mood_text = "win", f"Gewinn eingefahren bei {last['ticker']}: +{pnl:.2f} $ 🎉"
+                else:
+                    mood, mood_text = "loss", f"Verlust bei {last['ticker']}: {pnl:.2f} $ — weiter geht's."
+
         col_img, col_info = st.columns([1, 2])
         with col_img:
-            st.markdown(
-                f'<img src="data:image/svg+xml;base64,{JERRY_MASCOT_B64}" '
-                'style="width:100%;max-width:180px;border-radius:16px;" alt="Jerry">',
-                unsafe_allow_html=True,
-            )
+            render_jerry_widget(mood, mood_text)
         with col_info:
             weekday = datetime.now(ZoneInfo("Europe/Berlin")).weekday()
             modus = "Krypto-Modus (Wochenende)" if weekday >= 5 else "Aktien-Modus (Werktag)"
@@ -2771,15 +2880,6 @@ def render_jerry_daytrader():
                 "nach festen Regeln (EMA/RSI/ATR) -- hier gibt es nichts manuell zu bedienen."
             )
 
-        client = get_supabase_client()
-        if client is None:
-            st.warning("Kein Supabase-Client verfügbar -- Jerrys Status kann gerade nicht geladen werden.")
-            return
-        try:
-            row = _fetch_one(client.table("scanner_paper_accounts").select("*").eq("account_key", "jerry_bot_v1"))
-        except Exception as exc:
-            st.warning(f"Jerrys Status konnte nicht geladen werden: {exc}")
-            return
         if not row:
             st.info("Jerry hat noch keinen ersten Lauf hinter sich. Sobald der GitHub-Actions-Cron einmal gelaufen ist, erscheinen hier Kontostand und Trades.")
             return
@@ -2789,14 +2889,6 @@ def render_jerry_daytrader():
         c2.metric("Guthaben (Cash)", f"{float(row['cash']):,.2f} $")
         position = row.get("position")
         c3.metric("Offene Position", position.get("ticker") if position else "Keine")
-
-        try:
-            orders = (
-                client.table("scanner_paper_orders").select("created_at,action,ticker,price,units,pnl,reason")
-                .eq("account_key", "jerry_bot_v1").order("created_at", desc=True).limit(30).execute().data or []
-            )
-        except Exception:
-            orders = []
 
         st.markdown("**Handelsprotokoll (Zeitstempel, neueste zuerst)**")
         if orders:
