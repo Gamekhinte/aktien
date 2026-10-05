@@ -893,6 +893,62 @@ SCANNER_UNIVERSE["Core"] = "CORE-USD"
 SCANNER_UNIVERSE["Merlin Chain"] = "MERL-USD"
 SCANNER_UNIVERSE["Bitlayer"] = "BTR-USD"
 
+# ------------------------------------------------------------
+# Trade-Republic-Filter: TR listet praktisch alle S&P-500-Aktien und die
+# großen ETFs oben im Universum, aber nur ca. 50-55 Kryptowährungen (Stand
+# 2026) -- und veröffentlicht dafür KEINE offizielle, öffentlich abrufbare
+# Liste (nur einsehbar in der App unter "Krypto"). Diese Liste ist daher eine
+# manuell kuratierte Annäherung an die am häufigsten genannten TR-Coins,
+# KEINE Live-Daten von Trade Republic selbst -- bitte vor dem Handeln in der
+# App gegenprüfen, falls ein einzelner Coin fehlt oder zu viel drin ist.
+TRADE_REPUBLIC_CRYPTO_TICKERS = {
+    "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "ADA-USD",
+    "DOGE-USD", "AVAX-USD", "TRX-USD", "LINK-USD", "DOT-USD", "MATIC-USD",
+    "SHIB-USD", "LTC-USD", "BCH-USD", "NEAR-USD", "UNI-USD", "ICP-USD",
+    "XLM-USD", "ETC-USD", "FIL-USD", "ATOM-USD", "HBAR-USD", "VET-USD",
+    "OP-USD", "MKR-USD", "GRT-USD", "ALGO-USD", "AAVE-USD", "QNT-USD",
+    "EGLD-USD", "SAND-USD", "MANA-USD", "APT-USD", "ARB-USD", "INJ-USD",
+    "SUI-USD", "RENDER-USD", "IMX-USD", "CRV-USD", "LDO-USD", "FTM-USD",
+    "THETA-USD", "XTZ-USD", "CHZ-USD", "FLOW-USD", "KSM-USD", "ZEC-USD",
+    "DASH-USD", "COMP-USD", "ENJ-USD", "SNX-USD", "YFI-USD", "UMA-USD",
+    "1INCH-USD", "PEPE-USD",
+}
+
+# Hebelprodukte (Knock-Outs/Optionsscheine via Drittanbieter wie Morgan
+# Stanley, HSBC etc.) gibt es bei TR realistischerweise nur auf sehr liquide,
+# große Basiswerte -- Indizes/Rohstoff-ETFs, die größten Blue-Chip-Aktien und
+# die größten Kryptowährungen. Auch das ist eine kuratierte Einschätzung,
+# keine Live-Produktliste.
+TRADE_REPUBLIC_LEVERAGE_ELIGIBLE = {
+    # Indizes & Rohstoffe (über ETF-Proxy im Universum)
+    "SPY", "QQQ", "DIA", "IWM", "GLD", "SLV", "VTI", "VOO",
+    # Mega-Cap-Aktien, auf die es üblicherweise Knock-Outs/Optionsscheine gibt
+    "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "NVDA", "TSLA",
+    "BRK.B", "AVGO", "JPM", "V", "MA", "UNH", "XOM", "JNJ", "WMT",
+    "PG", "HD", "COST", "NFLX", "AMD", "CRM", "ORCL", "ADBE", "BAC",
+    "KO", "PEP", "DIS", "INTC", "CSCO", "PFE", "ABBV", "MRK", "TMO",
+    # größte, liquideste Kryptos
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "DOGE-USD",
+    "BNB-USD", "LTC-USD", "LINK-USD", "DOT-USD", "AVAX-USD", "MATIC-USD",
+    "SHIB-USD", "UNI-USD", "ATOM-USD",
+}
+
+
+def trade_republic_universe(universe: dict[str, str]) -> dict[str, str]:
+    """Filtert ein Universum auf das, was bei Trade Republic laut unserer
+    kuratierten Liste tatsächlich handelbar ist: Aktien/ETFs bleiben (TR
+    deckt den S&P 500 + große ETFs praktisch vollständig ab), Krypto wird auf
+    die kuratierte TR-Coin-Liste eingeschränkt."""
+    return {
+        label: ticker for label, ticker in universe.items()
+        if not ticker.endswith("-USD") or ticker in TRADE_REPUBLIC_CRYPTO_TICKERS
+    }
+
+
+def is_leverage_eligible(ticker: str) -> bool:
+    return ticker in TRADE_REPUBLIC_LEVERAGE_ELIGIBLE
+
+
 @st.cache_resource(show_spinner=False)
 def get_supabase_client():
     if not SUPABASE_PACKAGE_AVAILABLE:
@@ -1632,7 +1688,11 @@ def searchable_asset_select(
     label: str, options: list[str], key: str,
     placeholder: str = "z.B. AAPL oder Apple", label_visibility: str = "visible",
 ) -> str | None:
-    """Selectbox mit vorgeschalteter Text-Suche, für Listen mit sehr vielen Assets."""
+    """Selectbox mit vorgeschalteter Text-Suche, für Listen mit sehr vielen Assets.
+    Bug-Fix: Ticker, die (noch) nicht in der vordefinierten Liste/Watchlist
+    stehen (z.B. frisch getippte Symbole), führten bisher nur zu "Kein Treffer"
+    und ließen sich nicht verwenden. Jetzt kann der getippte Text direkt als
+    Ticker übernommen werden, auch ohne Treffer in der Liste."""
     search_key = f"{key}__search"
     search_value = st.text_input(f"{label} suchen", key=search_key, placeholder=placeholder, label_visibility="collapsed" if label_visibility == "collapsed" else "visible")
     if search_value.strip():
@@ -1640,12 +1700,27 @@ def searchable_asset_select(
         filtered = [name for name in options if needle in name.upper()]
     else:
         filtered = options
+        needle = ""
+
     if not filtered:
-        st.caption("Kein Treffer für diese Suche.")
-        return None
+        custom_ticker = needle
+        st.caption(f"Kein Treffer in der Liste -- „{custom_ticker}\" wird direkt als Ticker-Symbol verwendet.")
+        return custom_ticker
+
+    # Freie Eingabe (z.B. ein Ticker, der nicht in ASSETS/Watchlist steht)
+    # bleibt als eigene Option auswählbar, statt zu verschwinden.
+    if needle and needle not in [o.upper() for o in filtered]:
+        custom_label = f"„{search_value.strip()}\" direkt verwenden"
+        filtered = [custom_label] + filtered
+    else:
+        custom_label = None
+
     if st.session_state.get(key) not in filtered:
         st.session_state[key] = filtered[0]
-    return st.selectbox(label, filtered, key=key, label_visibility=label_visibility)
+    choice = st.selectbox(label, filtered, key=key, label_visibility=label_visibility)
+    if custom_label is not None and choice == custom_label:
+        return search_value.strip().upper()
+    return choice
 
 def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> pd.DataFrame:
     if source == "Interactive Brokers Paper-Feed":
@@ -4044,6 +4119,7 @@ def scan_extreme_patterns(
                         "Stop-Loss": stop_loss,
                         "Take-Profit": take_profit,
                         "Vergleich": vergleich,
+                        "Hebelbar bei TR": "⚡ Ja" if is_leverage_eligible(ticker) else "Nein",
                     }
                     if probability >= bullish_threshold:
                         bullish_rows.append(row)
@@ -4070,7 +4146,7 @@ def _filter_universe_by_class(universe: dict[str, str], asset_class: str) -> dic
     return universe
 
 def _run_and_store_extreme_scan(interval_key: str, limit: int, asset_class: str = "Alle") -> None:
-    universe = _filter_universe_by_class(SCANNER_UNIVERSE, asset_class)
+    universe = _filter_universe_by_class(trade_republic_universe(SCANNER_UNIVERSE), asset_class)
     bullish_df, bearish_df = scan_extreme_patterns(universe, interval_key, limit)
     st.session_state.extreme_bullish = bullish_df
     st.session_state.extreme_bearish = bearish_df
@@ -4088,17 +4164,24 @@ if _HAS_FRAGMENT:
         st.caption(f"Zuletzt automatisch aktualisiert: {st.session_state.extreme_scanned_at} Uhr (alle 5 Minuten, nur solange dieser Tab offen ist)")
 
 def render_extreme_pattern_scanner():
-    with st.expander("Live-Scan: stärkste Long- & Short-Muster (S&P 500 + Top-Kryptos)", expanded=True):
+    with st.expander("Live-Scan: stärkste Long- & Short-Muster (nur bei Trade Republic handelbar)", expanded=True):
+        _tr_universe = trade_republic_universe(SCANNER_UNIVERSE)
         st.caption(
-            f"Durchsucht bis zu {len(SCANNER_UNIVERSE)} der bekanntesten Aktien (alle aktuellen S&P-500-Mitglieder) "
-            "und größten Kryptowährungen nach Kerzenmustern mit historisch sehr eindeutiger Richtung. "
-            "Kein echter Live-Tick-Feed: Basis sind abgeschlossene Kerzen von Yahoo Finance, die periodisch neu geladen werden."
+            f"Durchsucht {len(_tr_universe)} Assets, die laut unserer kuratierten Liste bei Trade Republic "
+            "handelbar sind (alle S&P-500-Aktien/großen ETFs + ca. 50 der bekanntesten Kryptowährungen) "
+            "nach Kerzenmustern mit historisch sehr eindeutiger Richtung. Die Spalte **„Hebelbar bei TR“** "
+            "markiert Assets, auf die TR üblicherweise Hebelprodukte (Knock-Outs/Optionsscheine) anbietet -- "
+            "große Indizes/Rohstoff-ETFs, Mega-Cap-Aktien und die liquidesten Kryptos. "
+            "⚠️ Trade Republic veröffentlicht keine offizielle, vollständige Liste seiner Krypto- oder "
+            "Hebelprodukt-Palette -- das hier ist eine manuell kuratierte Annäherung, bitte vor dem Handeln "
+            "in der TR-App gegenprüfen. Kein echter Live-Tick-Feed: Basis sind abgeschlossene Kerzen von "
+            "Yahoo Finance, die periodisch neu geladen werden."
         )
         extreme_asset_class = st.radio(
             "Asset-Klasse", ["Alle", "Nur Aktien", "Nur Krypto"],
             horizontal=True, key="extreme_asset_class",
         )
-        filtered_universe = _filter_universe_by_class(SCANNER_UNIVERSE, extreme_asset_class)
+        filtered_universe = _filter_universe_by_class(_tr_universe, extreme_asset_class)
         col_a, col_b, col_c = st.columns(3)
         with col_a:
             extreme_interval = st.selectbox("Intervall", ["1h", "1d"], index=1, key="extreme_interval")
@@ -4121,7 +4204,7 @@ def render_extreme_pattern_scanner():
         st.caption(
             f"Ein manueller Scan über {extreme_limit} Assets ({extreme_asset_class.lower()}) dauert grob "
             f"{max(1, extreme_limit // 100)}–{max(2, extreme_limit // 40)} Minute(n), abhängig von Yahoo Finance. "
-            "Für ständige Überwachung aller ~600 Assets in echter Echtzeit bräuchte es einen bezahlten Marktdaten-Feed "
+            f"Für ständige Überwachung aller {len(_tr_universe)} Assets in echter Echtzeit bräuchte es einen bezahlten Marktdaten-Feed "
             "und einen dauerhaft laufenden Server statt einer kostenlosen Streamlit-App."
         )
         if not _HAS_FRAGMENT:
