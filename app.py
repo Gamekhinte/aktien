@@ -4121,10 +4121,26 @@ def scan_extreme_patterns(
                         "Vergleich": vergleich,
                         "Hebelbar bei TR": "⚡ Ja" if is_leverage_eligible(ticker) else "Nein",
                     }
-                    if probability >= bullish_threshold:
-                        bullish_rows.append(row)
-                    elif probability <= bearish_threshold:
-                        bearish_rows.append(row)
+                    is_bull_pattern = "bullisch" in pattern
+                    is_bear_pattern = "bärisch" in pattern
+                    if is_bull_pattern:
+                        # Trefferquote = Gewinnrate des LONG-Trades -- hoch ist gut.
+                        if probability >= bullish_threshold:
+                            bullish_rows.append(row)
+                    elif is_bear_pattern:
+                        # Trefferquote = Gewinnrate des SHORT-Trades -- ebenfalls
+                        # hoch ist gut (NICHT niedrig -- das wäre ein gescheiterter
+                        # Short, kein starkes Short-Signal).
+                        if probability >= bullish_threshold:
+                            bearish_rows.append(row)
+                    else:
+                        # Richtungslose Muster (Doji etc.): Trefferquote =
+                        # Wahrscheinlichkeit für höheren Folgekurs, hier gilt die
+                        # alte Logik weiterhin.
+                        if probability >= bullish_threshold:
+                            bullish_rows.append(row)
+                        elif probability <= bearish_threshold:
+                            bearish_rows.append(row)
             except Exception:
                 continue
 
@@ -4133,7 +4149,7 @@ def scan_extreme_patterns(
         if bullish_rows else pd.DataFrame()
     )
     bearish_df = (
-        pd.DataFrame(bearish_rows).sort_values(["Trefferquote %", "Vergleichsfälle"], ascending=[True, False])
+        pd.DataFrame(bearish_rows).sort_values(["Trefferquote %", "Vergleichsfälle"], ascending=[False, False])
         if bearish_rows else pd.DataFrame()
     )
     return bullish_df, bearish_df
