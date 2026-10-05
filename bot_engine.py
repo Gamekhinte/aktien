@@ -56,6 +56,14 @@ class BotConfig:
     period: str = "6mo"              # wie viel Historie geladen wird
     scan_limit: int = 80             # wie viele Assets pro Lauf geprüft werden
 
+    # --- Hebel & selbstbestimmter Cash-out ---
+    max_leverage: float = 1.0        # Obergrenze, die der Bot selbst wählen darf (1.0 = kein Hebel)
+    trailing_activate_r: float = 1.0 # ab diesem Vielfachen des ursprünglichen Risikos ("R") im Plus
+                                      # beginnt der Bot, den Stop nachzuziehen (Gewinn sichern)
+    trailing_distance_r: float = 0.5 # wie eng der nachgezogene Stop hinter dem besten Kurs bleibt (in "R")
+    max_hold_cycles: int | None = None  # nach so vielen Läufen wird notfalls zum Marktpreis "cashed out",
+                                         # auch wenn weder Stop noch Ziel erreicht wurde (None = kein Limit)
+
 
 # ------------------------------------------------------------
 # Universum aus app.py extrahieren (kein Import von app.py selbst,
@@ -167,11 +175,22 @@ def load_account(client, cfg: BotConfig) -> dict:
     else:
         positions = []
 
+    raw_seen = row.get("last_candle")
+    if isinstance(raw_seen, str):
+        # Alt-Bug: last_candle wurde als Text-String (z.B. "{}") statt als
+        # echtes JSON-Objekt gespeichert -- robust auflösen statt crashen.
+        import json as _json
+        try:
+            raw_seen = _json.loads(raw_seen)
+        except (ValueError, TypeError):
+            raw_seen = {}
+    seen_candles = raw_seen if isinstance(raw_seen, dict) else {}
+
     return {
         "cash": float(row["cash"]), "equity": float(row["equity"]),
         "risk_percent": float(row.get("risk_percent") or cfg.risk_percent),
         "positions": positions,
-        "seen_candles": row.get("last_candle") or {},  # {ticker: candle_time}
+        "seen_candles": seen_candles,  # {ticker: candle_time}
     }
 
 
@@ -198,26 +217,73 @@ def save_account(client, cfg: BotConfig, account: dict, events: list[dict]) -> N
 
 
 def _mark_to_market_equity(account: dict, price_by_ticker: dict[str, float]) -> float:
+    """Bei gehebelten Positionen gehört dem Bot nicht der volle Positionswert,
+    sondern nur die hinterlegte Margin + der bisherige (unrealisierte)
+    Gewinn/Verlust der Position."""
     equity = account["cash"]
     for pos in account["positions"]:
         price = price_by_ticker.get(pos["ticker"], pos.get("entry", 0))
-        equity += pos["units"] * price
+        margin = pos.get("margin", pos.get("cost", 0))
+        unrealized_pnl = pos["units"] * (price - pos["entry"])
+        equity += margin + unrealized_pnl
     return equity
 
 
-def _try_close_position(account: dict, pos: dict, ticker: str, price: float, direction: str, candle_time: str) -> dict | None:
+def _choose_leverage(cfg: BotConfig, setup: dict, score: float) -> float:
+    """Der Bot bestimmt den Hebel selbst -- je stärker/sauberer das Signal
+    (hohes Volumen, RSI nahe am Sweet-Spot), desto mehr von seinem
+    persönlichen Hebel-Limit (max_leverage) schöpft er aus. Ein schwaches
+    Signal wird nicht gehebelt (Hebel = 1x)."""
+    if cfg.max_leverage <= 1.0:
+        return 1.0
+    # score liegt typischerweise zwischen ca. 0 und 100 (siehe scan_candidates)
+    confidence = max(0.0, min(score / 85.0, 1.0))
+    leverage = 1.0 + confidence * (cfg.max_leverage - 1.0)
+    return round(leverage, 2)
+
+
+def _try_close_position(cfg: BotConfig, account: dict, pos: dict, ticker: str, price: float, direction: str, candle_time: str) -> dict | None:
+    """Prüft, ob der Bot diese Position schließt. Vier mögliche Gründe:
+    1) fester Stop-Loss erreicht, 2) festes Take-Profit-Ziel erreicht,
+    3) nachgezogener Trailing-Stop ausgelöst (der Bot sichert selbstständig
+       Gewinn, sobald er im Plus liegt -- "cash out, wann er will"),
+    4) Trendwechsel (EMA/RSI drehen) -- der Bot verlässt die Position auch
+       dann, wenn weder Stop noch Ziel erreicht wurde, weil die Logik hinter
+       dem Trade nicht mehr gilt,
+    5) maximale Haltedauer überschritten (nur falls cfg das vorsieht) --
+       verhindert, dass eine Position endlos offen bleibt."""
+    pos["best_price"] = max(pos.get("best_price", pos["entry"]), price)
+    pos["runs_held"] = pos.get("runs_held", 0) + 1
+
+    risk = max(pos["entry"] - pos["stop"], 1e-9)  # "1R" in Preis-Einheiten
+    # Wichtig: die Aktivierung hängt am BESTEN je erreichten Kurs, nicht am
+    # aktuellen -- sonst würde sich der Gewinnschutz bei jedem Rücksetzer
+    # wieder deaktivieren, obwohl der Trade zwischenzeitlich im Plus war.
+    best_r = (pos["best_price"] - pos["entry"]) / risk
+
+    effective_stop = pos["stop"]
+    if best_r >= cfg.trailing_activate_r:
+        trailing_stop = pos["best_price"] - cfg.trailing_distance_r * risk
+        effective_stop = max(effective_stop, trailing_stop)
+
     close_reason = None
-    if price <= pos["stop"]:
-        close_reason = "Stop-Loss erreicht"
+    if price <= effective_stop:
+        close_reason = (
+            "Trailing-Stop ausgelöst -- Gewinn selbst gesichert"
+            if effective_stop > pos["stop"] else "Stop-Loss erreicht"
+        )
     elif price >= pos["target"]:
         close_reason = "Take-Profit erreicht"
-    elif direction == "short":
-        close_reason = "Trendwechsel: EMA/RSI geben ein Verkaufssignal"
+    elif direction != "long":
+        close_reason = "Trendwechsel: EMA/RSI drehen -- Position selbst aufgelöst"
+    elif cfg.max_hold_cycles and pos["runs_held"] >= cfg.max_hold_cycles:
+        close_reason = "Maximale Haltedauer erreicht -- Position vorsorglich ausgecasht"
     if not close_reason:
         return None
-    proceeds = pos["units"] * price
-    account["cash"] += proceeds
-    pnl = proceeds - pos["cost"]
+
+    margin = pos.get("margin", pos.get("cost", 0))
+    pnl = pos["units"] * (price - pos["entry"])  # gehebelter Gewinn/Verlust in $
+    account["cash"] += margin + pnl
     account["positions"] = [p for p in account["positions"] if p is not pos]
     return {
         "Zeit": candle_time, "Aktion": "VERKAUF", "Asset": ticker,
@@ -226,11 +292,14 @@ def _try_close_position(account: dict, pos: dict, ticker: str, price: float, dir
     }
 
 
-def _try_open_position(cfg: BotConfig, account: dict, ticker: str, setup: dict, candle_time: str) -> dict | None:
-    """Öffnet eine neue, diversifizierte Position -- niemals mehr als
-    max_position_pct des Kontowerts und niemals mehr, als der Cash-Puffer
-    zulässt. Das verhindert, dass der Bot sein gesamtes Geld in einen
-    einzelnen Trade steckt."""
+def _try_open_position(cfg: BotConfig, account: dict, ticker: str, setup: dict, score: float, candle_time: str) -> dict | None:
+    """Öffnet eine neue, diversifizierte Position -- die als MARGIN (Cash,
+    das wirklich abgezogen wird) niemals mehr als max_position_pct des
+    Kontowerts und niemals mehr, als der Cash-Puffer zulässt. Das verhindert,
+    dass der Bot sein gesamtes Geld in einen einzelnen Trade steckt.
+    Der Bot darf diese Margin zusätzlich selbst hebeln (bis max_leverage) --
+    das vergrößert die Positionsgröße (und damit Gewinn-/Verlust-Chance),
+    OHNE den gebundenen Cash-Einsatz zu erhöhen."""
     if len(account["positions"]) >= cfg.max_positions:
         return None
     if any(p["ticker"] == ticker for p in account["positions"]):
@@ -251,26 +320,34 @@ def _try_open_position(cfg: BotConfig, account: dict, ticker: str, setup: dict, 
     risk_budget = equity * account["risk_percent"] / 100
     max_position_value = equity * cfg.max_position_pct
 
-    # Drei unabhängige Obergrenzen, es gilt die strengste (kleinste):
+    # Drei unabhängige Obergrenzen für die MARGIN (der tatsächliche Cash-Einsatz),
+    # es gilt die strengste (kleinste):
     # 1) wie viel laut Risiko-Budget (Stop-Distanz) investiert werden darf
     # 2) die harte Positionsgrößen-Grenze (Diversifikations-Schutz)
     # 3) wie viel Cash nach Abzug des Reserve-Puffers überhaupt noch frei ist
-    position_value = min(risk_budget / risk_per_unit * price, max_position_value, available_cash)
-    units = position_value / price
-    if units <= 0 or position_value < 1.0:
+    margin = min(risk_budget / risk_per_unit * price, max_position_value, available_cash)
+    if margin <= 0 or margin < 1.0:
         return None
 
-    cost = units * price
-    account["cash"] -= cost
+    leverage = _choose_leverage(cfg, setup, score)
+    position_value = margin * leverage  # Hebel vergrößert die Positionsgröße, nicht die Margin
+    units = position_value / price
+    if units <= 0:
+        return None
+
+    account["cash"] -= margin
     account["positions"].append({
-        "ticker": ticker, "units": units, "cost": cost, "entry": price,
+        "ticker": ticker, "units": units, "cost": position_value, "margin": margin,
+        "leverage": leverage, "entry": price, "best_price": price, "runs_held": 0,
         "stop": float(stop), "target": float(setup["target"]),
     })
+    hebel_hinweis = f" mit {leverage:.1f}x Hebel" if leverage > 1.0 else " ohne Hebel"
     return {
         "Zeit": candle_time, "Aktion": "KAUF", "Asset": ticker,
         "Preis": round(price, 4), "Menge": round(units, 6), "Ergebnis": 0.0,
         "Warum": f"Long-Signal: Kurs über EMA {DEFAULT_PARAMS['ema_fast']}/{DEFAULT_PARAMS['ema_slow']} "
-                 f"und RSI im bullischen Bereich ({position_value / equity * 100:.1f} % des Kontowerts)",
+                 f"und RSI im bullischen Bereich ({margin / equity * 100:.1f} % Margin des Kontowerts"
+                 f"{hebel_hinweis})",
     }
 
 
@@ -282,16 +359,17 @@ def run_cycle(cfg: BotConfig, candidates: list[dict], account: dict) -> tuple[di
     events: list[dict] = []
     price_by_ticker = {c["ticker"]: float(c["setup"]["entry"]) for c in candidates}
 
-    # 1) Exits zuerst -- bestehende Positionen mit aktuellen Kursen prüfen.
+    # 1) Exits zuerst -- bestehende Positionen bei JEDEM Lauf mit aktuellen
+    #    Kursen prüfen (nicht nur bei neuer Kerze), damit Trailing-Stop und
+    #    Haltedauer-Zählung den Bot wirklich jederzeit selbst entscheiden
+    #    lassen, auszucashen -- nicht erst, wenn eine neue Kerze entsteht.
     for pos in list(account["positions"]):
         match = next((c for c in candidates if c["ticker"] == pos["ticker"]), None)
         if not match:
             continue
         candle_time = match["candle_time"]
-        if account["seen_candles"].get(pos["ticker"]) == candle_time:
-            continue
         event = _try_close_position(
-            account, pos, pos["ticker"], price_by_ticker[pos["ticker"]],
+            cfg, account, pos, pos["ticker"], price_by_ticker[pos["ticker"]],
             match["setup"]["direction"], candle_time,
         )
         account["seen_candles"][pos["ticker"]] = candle_time
@@ -300,7 +378,8 @@ def run_cycle(cfg: BotConfig, candidates: list[dict], account: dict) -> tuple[di
 
     # 2) Neue Einstiege -- nur klare KAUFEN-Signale, beste Kandidaten zuerst,
     #    bis das Positionslimit erreicht ist. So verteilt sich das Kapital
-    #    automatisch über mehrere Assets statt "alles auf eine Karte".
+    #    automatisch über mehrere Assets statt "alles auf eine Karte". Der
+    #    Hebel wird je Trade vom Bot selbst anhand der Signalstärke gewählt.
     buy_candidates = [c for c in candidates if c["setup"]["signal"].startswith("KAUFEN")]
     buy_candidates.sort(key=lambda c: c["score"], reverse=True)
     for cand in buy_candidates:
@@ -308,8 +387,8 @@ def run_cycle(cfg: BotConfig, candidates: list[dict], account: dict) -> tuple[di
             break
         ticker, candle_time = cand["ticker"], cand["candle_time"]
         if account["seen_candles"].get(ticker) == candle_time:
-            continue  # diese Kerze für dieses Asset wurde schon verarbeitet
-        event = _try_open_position(cfg, account, ticker, cand["setup"], candle_time)
+            continue  # diese Kerze für dieses Asset wurde schon verarbeitet -> nicht doppelt kaufen
+        event = _try_open_position(cfg, account, ticker, cand["setup"], cand["score"], candle_time)
         account["seen_candles"][ticker] = candle_time
         if event:
             events.append(event)
