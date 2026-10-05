@@ -3062,17 +3062,21 @@ BOT_VARIANTS = {
         "account_key": "jerry_bot_v1", "label": "Jerry · Minuten-Trader (grün)",
         "frequency": "Handelt alle paar Minuten (5-15min-Kerzen).",
         "sizing": "Verteilt Kapital auf bis zu 6 Positionen à max. 10 % des Kontos -- "
-                   "bei hoher Frequenz besonders kleine Häppchen, um nicht zu überdrehen.",
+                   "bei hoher Frequenz besonders kleine Häppchen, um nicht zu überdrehen. "
+                   "Hebelt selbstständig bis zu 3x bei starken Signalen und sichert Gewinne "
+                   "mit einem engen, selbst nachgezogenen Trailing-Stop -- cashed dadurch spürbar schneller aus.",
     },
     "jan": {
         "account_key": "jan_bot_v1", "label": "Jan · Stunden-Trader (gelb)",
         "frequency": "Handelt alle paar Stunden (1h-Kerzen).",
-        "sizing": "Verteilt Kapital auf bis zu 5 Positionen à max. 15 % des Kontos.",
+        "sizing": "Verteilt Kapital auf bis zu 5 Positionen à max. 15 % des Kontos. "
+                   "Hebelt selbstständig bis zu 2x und zieht den Stop in moderatem Tempo nach.",
     },
     "joseph": {
         "account_key": "joseph_bot_v1", "label": "Joseph · Tages-Trader (rot)",
         "frequency": "Handelt höchstens 1-2x pro Tag (Tages-Kerzen).",
-        "sizing": "Verteilt Kapital auf bis zu 4 Positionen à max. 20 % des Kontos.",
+        "sizing": "Verteilt Kapital auf bis zu 4 Positionen à max. 20 % des Kontos. "
+                   "Hebelt vorsichtig bis max. 1.5x und lässt Gewinne geduldig länger laufen, bevor er nachzieht.",
     },
 }
 
@@ -3159,7 +3163,8 @@ def render_trading_bot(bot_key: str):
                     "Asset": p.get("ticker"),
                     "Einstieg": round(float(p.get("entry", 0)), 4),
                     "Menge": round(float(p.get("units", 0)), 6),
-                    "Kapitalanteil": f"{(float(p.get('cost', 0)) / float(row['equity']) * 100):.1f} %" if float(row.get("equity") or 0) else "–",
+                    "Hebel": f"{float(p.get('leverage', 1.0)):.1f}x",
+                    "Margin (echter Einsatz)": f"{(float(p.get('margin', p.get('cost', 0))) / float(row['equity']) * 100):.1f} %" if float(row.get("equity") or 0) else "–",
                     "Stop-Loss": round(float(p.get("stop", 0)), 4) if p.get("stop") is not None else "–",
                     "Take-Profit": round(float(p.get("target", 0)), 4) if p.get("target") is not None else "–",
                 }
