@@ -18,6 +18,13 @@ CONFIG = BotConfig(
     interval="1h",
     period="60d",
     scan_limit=80,
+
+    # Moderater, selbst gewählter Hebel und ein mittleres Trailing-Stop-Tempo --
+    # zwischen Jerrys schnellem und Josephs geduldigem Stil.
+    max_leverage=2.0,
+    trailing_activate_r=0.75,
+    trailing_distance_r=0.4,
+    max_hold_cycles=24,        # ~1 Tag bei 1h-Kerzen
 )
 
 if __name__ == "__main__":
