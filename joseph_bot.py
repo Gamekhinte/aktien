@@ -20,6 +20,14 @@ CONFIG = BotConfig(
     interval="1d",
     period="1y",
     scan_limit=80,
+
+    # Joseph hebelt nur vorsichtig (max. 1.5x, und auch das nur bei richtig
+    # starkem Signal) und lässt Gewinne länger laufen, bevor er nachzieht --
+    # passt zu seinem geduldigen "alter Hase"-Charakter.
+    max_leverage=1.5,
+    trailing_activate_r=1.0,
+    trailing_distance_r=0.6,
+    max_hold_cycles=20,        # ~20 Handelstage, bevor notfalls zwangsweise ausgecasht wird
 )
 
 if __name__ == "__main__":
