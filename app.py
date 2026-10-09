@@ -893,6 +893,17 @@ SCANNER_UNIVERSE["Core"] = "CORE-USD"
 SCANNER_UNIVERSE["Merlin Chain"] = "MERL-USD"
 SCANNER_UNIVERSE["Bitlayer"] = "BTR-USD"
 
+# --- ⭐ Wichtig-Watchlist (siehe watchlist_wichtig.py) ---
+# Diese Assets werden in jedem Scan zuerst geprüft und von den Bots bei JEDEM
+# Lauf beobachtet. Fehlende Ticker kommen zusätzlich ins Scan-Universum.
+from watchlist_wichtig import WICHTIG_DEFAULT, load_wichtig, save_wichtig
+from bot_engine import analyze as bot_analyze, download_many as bot_download_many
+
+_known_tickers = set(SCANNER_UNIVERSE.values())
+for _label, _ticker in WICHTIG_DEFAULT.items():
+    if _ticker not in _known_tickers:
+        SCANNER_UNIVERSE[f"⭐ {_label}"] = _ticker
+
 # ------------------------------------------------------------
 # Trade-Republic-Filter: TR listet praktisch alle S&P-500-Aktien und die
 # großen ETFs oben im Universum, aber nur ca. 50-55 Kryptowährungen (Stand
@@ -973,6 +984,28 @@ def get_supabase_client():
 
 def learning_db_ready() -> bool:
     return get_supabase_client() is not None
+
+def get_wichtig_assets() -> dict[str, str]:
+    """⭐ Wichtig-Liste: Sitzungs-Kopie > Supabase (gemeinsam mit den Bots) > Default."""
+    if "wichtig_assets" not in st.session_state:
+        st.session_state.wichtig_assets = load_wichtig(get_supabase_client())
+    return dict(st.session_state.wichtig_assets)
+
+def set_wichtig_assets(assets: dict[str, str]) -> bool:
+    """Speichert die Liste für diese Sitzung und -- wenn möglich -- dauerhaft in
+    Supabase, damit auch Jerry/Jan/Joseph ab ihrem nächsten Lauf darauf schauen."""
+    st.session_state.wichtig_assets = dict(assets)
+    return save_wichtig(get_supabase_client(), assets)
+
+def with_wichtig_first(universe: dict[str, str], limit: int | None = None) -> list[tuple[str, str]]:
+    """Wichtig-Assets immer zuerst (und immer dabei), danach der Rest bis zum Limit."""
+    wichtig = get_wichtig_assets()
+    items = [(f"⭐ {label}", ticker) for label, ticker in wichtig.items()]
+    seen = set(wichtig.values())
+    rest = [(label, ticker) for label, ticker in universe.items() if ticker not in seen and not seen.add(ticker)]
+    if limit is not None:
+        rest = rest[:max(limit - len(items), 0)]
+    return items + rest
 
 def _fetch_one(query):
     """Sicherer Ersatz für .maybe_single(): manche postgrest-py-Versionen liefern
@@ -1722,6 +1755,12 @@ def searchable_asset_select(
         return search_value.strip().upper()
     return choice
 
+@st.cache_data(ttl=120, show_spinner=False, max_entries=500)
+def _yf_download_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    """Gleiche Abfrage innerhalb von 2 Minuten wird nicht erneut bei Yahoo geladen
+    -- macht Reruns, Scanner und Charts spürbar schneller."""
+    return yf.download(ticker, period=period, interval=interval, progress=False)
+
 def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> pd.DataFrame:
     if source == "Interactive Brokers Paper-Feed":
         feed = st.session_state.get("ibkr_feed")
@@ -1730,7 +1769,7 @@ def load_data(ticker: str, interval_key: str, source: str = "Yahoo Finance") -> 
         return feed.fetch_bars(ticker, interval_key)
 
     cfg = INTERVAL_CONFIG[interval_key]
-    df = yf.download(ticker, period=cfg["period"], interval=cfg["yf_interval"], progress=False)
+    df = _yf_download_cached(ticker, cfg["period"], cfg["yf_interval"]).copy()
 
     if df.empty:
         return df
@@ -2346,38 +2385,43 @@ def calculate_trade_setup(df: pd.DataFrame, params: dict = None) -> dict:
         stop = target = None
         signal = "ABWARTEN"
 
+    # Historische Trefferquote -- mit NumPy-Arrays statt data.iloc je Zeile
+    # (gleiche Logik wie vorher, aber um ein Vielfaches schneller).
     wins = losses = 0
     look_ahead = 5
-    for index in range(len(data) - look_ahead):
-        historical_row = data.iloc[index]
-        historical_direction = _trade_direction(historical_row, p["rsi_bull"], p["rsi_bear"])
-        historical_atr = historical_row["ATR"]
-        if historical_direction == "neutral" or pd.isna(historical_atr) or historical_atr <= 0:
-            continue
-        historical_entry = float(historical_row["Close"])
-        historical_stop_distance = float(historical_atr) * p["atr_mult"]
-        if historical_direction == "long":
+    close_arr = data["Close"].to_numpy(dtype=float)
+    high_arr = data["High"].to_numpy(dtype=float)
+    low_arr = data["Low"].to_numpy(dtype=float)
+    atr_arr = data["ATR"].to_numpy(dtype=float)
+    rsi_arr = data["RSI"].to_numpy(dtype=float)
+    ema_f_arr = data["EMA_FAST"].to_numpy(dtype=float)
+    ema_s_arr = data["EMA_SLOW"].to_numpy(dtype=float)
+    with np.errstate(invalid="ignore"):
+        valid = ~np.isnan(rsi_arr) & ~np.isnan(atr_arr) & (atr_arr > 0)
+        bull = valid & (close_arr > ema_f_arr) & (ema_f_arr > ema_s_arr) & (rsi_arr >= p["rsi_bull"][0]) & (rsi_arr <= p["rsi_bull"][1])
+        bear = valid & ~bull & (close_arr < ema_f_arr) & (ema_f_arr < ema_s_arr) & (rsi_arr >= p["rsi_bear"][0]) & (rsi_arr <= p["rsi_bear"][1])
+    for index in np.flatnonzero((bull | bear)[: max(len(data) - look_ahead, 0)]):
+        is_long = bool(bull[index])
+        historical_entry = close_arr[index]
+        historical_stop_distance = atr_arr[index] * p["atr_mult"]
+        if is_long:
             historical_stop = historical_entry - historical_stop_distance
             historical_target = historical_entry + (p["reward_risk"] * historical_stop_distance)
         else:
             historical_stop = historical_entry + historical_stop_distance
             historical_target = historical_entry - (p["reward_risk"] * historical_stop_distance)
         for future_index in range(index + 1, index + look_ahead + 1):
-            future_row = data.iloc[future_index]
-            if historical_direction == "long":
-                hit_stop = future_row["Low"] <= historical_stop
-                hit_target = future_row["High"] >= historical_target
+            if is_long:
+                hit_stop = low_arr[future_index] <= historical_stop
+                hit_target = high_arr[future_index] >= historical_target
             else:
-                hit_stop = future_row["High"] >= historical_stop
-                hit_target = future_row["Low"] <= historical_target
-            if hit_stop and hit_target:
+                hit_stop = high_arr[future_index] >= historical_stop
+                hit_target = low_arr[future_index] <= historical_target
+            if hit_stop:  # Stop zuerst (auch wenn beides in derselben Kerze)
                 losses += 1
                 break
             if hit_target:
                 wins += 1
-                break
-            if hit_stop:
-                losses += 1
                 break
 
     total = wins + losses
@@ -2596,15 +2640,16 @@ def save_scanner_account(account: dict, event: dict | None) -> None:
 def scan_and_trade_paper_market(account: dict, interval_key: str, limit: int) -> tuple[dict, pd.DataFrame]:
     """Scan a capped liquid universe and paper-trade only the best valid setup."""
     candidates = []
-    universe = list(SCANNER_UNIVERSE.items())[:limit]
+    universe = with_wichtig_first(SCANNER_UNIVERSE, limit)  # ⭐ Wichtig immer dabei
     active_ticker = (account.get("position") or {}).get("ticker")
     if active_ticker:
-        universe = [(label, ticker) for label, ticker in SCANNER_UNIVERSE.items() if ticker == active_ticker]
+        universe = [(label, ticker) for label, ticker in universe if ticker == active_ticker] or [(active_ticker, active_ticker)]
 
+    data_map = batch_load_ohlc([ticker for _, ticker in universe], interval_key)  # ein Batch statt N Einzel-Downloads
     for label, ticker in universe:
         try:
-            data = load_data(ticker, interval_key, "Yahoo Finance")
-            if data.empty or len(data) < 50:
+            data = data_map.get(ticker)
+            if data is None or data.empty or len(data) < 50:
                 continue
             setup = calculate_trade_setup(data)
             volume_score = min(float(setup.get("volume_ratio") or 0), 3.0)
@@ -3135,23 +3180,24 @@ import random as _bot_random
 BOT_VARIANTS = {
     "jerry": {
         "account_key": "jerry_bot_v1", "label": "Jerry · Minuten-Trader (grün)",
-        "frequency": "Handelt alle paar Minuten (5-15min-Kerzen).",
-        "sizing": "Verteilt Kapital auf bis zu 6 Positionen à max. 10 % des Kontos -- "
-                   "bei hoher Frequenz besonders kleine Häppchen, um nicht zu überdrehen. "
-                   "Hebelt selbstständig bis zu 3x bei starken Signalen und sichert Gewinne "
-                   "mit einem engen, selbst nachgezogenen Trailing-Stop -- cashed dadurch spürbar schneller aus.",
+        "frequency": "Prüft alle 15 Minuten (15-Min-Kerzen), kauft und verkauft selbstständig -- Long und Short.",
+        "sizing": "Verteilt Kapital auf bis zu 6 Positionen à max. 10 % Margin -- "
+                   "bei hoher Frequenz besonders kleine Häppchen. Hebelt selbst bis zu 3x je nach "
+                   "Signalstärke, stellt den Stop sehr früh auf Break-even und sichert Gewinne mit einem "
+                   "engen Trailing-Stop.",
     },
     "jan": {
         "account_key": "jan_bot_v1", "label": "Jan · Stunden-Trader (gelb)",
-        "frequency": "Handelt alle paar Stunden (1h-Kerzen).",
-        "sizing": "Verteilt Kapital auf bis zu 5 Positionen à max. 15 % des Kontos. "
-                   "Hebelt selbstständig bis zu 2x und zieht den Stop in moderatem Tempo nach.",
+        "frequency": "Prüft jede Stunde (1h-Kerzen), kauft und verkauft selbstständig -- Long und Short.",
+        "sizing": "Verteilt Kapital auf bis zu 5 Positionen à max. 15 % Margin. "
+                   "Hebelt selbst bis zu 2x und zieht den Stop in moderatem Tempo nach.",
     },
     "joseph": {
         "account_key": "joseph_bot_v1", "label": "Joseph · Tages-Trader (rot)",
-        "frequency": "Handelt höchstens 1-2x pro Tag (Tages-Kerzen).",
-        "sizing": "Verteilt Kapital auf bis zu 4 Positionen à max. 20 % des Kontos. "
-                   "Hebelt vorsichtig bis max. 1.5x und lässt Gewinne geduldig länger laufen, bevor er nachzieht.",
+        "frequency": "Prüft 2x täglich (Tages-Kerzen), kauft und verkauft selbstständig -- nur Long.",
+        "sizing": "Verteilt Kapital auf bis zu 4 Positionen à max. 20 % Margin. "
+                   "Hebelt vorsichtig bis max. 1.5x, verlangt die höchste Signalqualität und lässt "
+                   "Gewinne geduldig laufen.",
     },
 }
 
@@ -3207,9 +3253,10 @@ def render_trading_bot(bot_key: str):
             st.caption(
                 f"{variant['frequency']} {variant['sizing']} Ich handle rund um die Uhr selbstständig im "
                 "Hintergrund über GitHub Actions -- auch wenn niemand diese Seite geöffnet hat. Am "
-                "Wochenende fokussiere ich mich auf Krypto, unter der Woche auf Aktien. Alle "
-                "Entscheidungen treffe ich eigenständig nach festen Regeln (EMA/RSI/ATR) -- hier gibt "
-                "es nichts manuell zu bedienen."
+                "Wochenende fokussiere ich mich auf Krypto, unter der Woche auf Aktien. Die ⭐ Wichtig-"
+                "Watchlist prüfe ich bei JEDEM Lauf, den Rest des Marktes rotierend. Einstieg nur bei "
+                "Trend (EMA 9/21/50) + RSI + MACD + ADX und wenn das Setup auf der Historie des Assets "
+                "positiv war; aus meinen eigenen Gewinnen/Verlusten lerne ich mit."
             )
 
         if not row:
@@ -3226,22 +3273,28 @@ def render_trading_bot(bot_key: str):
         else:
             positions = []
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Kontowert", f"{float(row['equity']):,.2f} $")
+        sells = [o for o in orders if o.get("action") == "SELL" and o.get("pnl") is not None]
+        win_rate = f"{sum(float(o['pnl']) > 0 for o in sells) / len(sells) * 100:.0f} %" if sells else "–"
+        start_cash = 10_000.0
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Kontowert", f"{float(row['equity']):,.2f} $", f"{(float(row['equity']) / start_cash - 1) * 100:+.2f} %")
         c2.metric("Guthaben (Cash)", f"{float(row['cash']):,.2f} $")
         c3.metric("Offene Positionen", str(len(positions)) if positions else "Keine")
+        c4.metric("Gewinnquote (letzte Trades)", win_rate)
 
         if positions:
             st.markdown("**Aktuell offene Positionen (diversifiziert, nicht \"alles auf eine Karte\")**")
             pos_df = pd.DataFrame([
                 {
-                    "Asset": p.get("ticker"),
+                    "Asset": ("⭐ " if p.get("wichtig") else "") + str(p.get("ticker")),
+                    "Richtung": "📉 Short" if p.get("side") == "short" else "📈 Long",
                     "Einstieg": round(float(p.get("entry", 0)), 4),
                     "Menge": round(float(p.get("units", 0)), 6),
                     "Hebel": f"{float(p.get('leverage', 1.0)):.1f}x",
                     "Margin (echter Einsatz)": f"{(float(p.get('margin', p.get('cost', 0))) / float(row['equity']) * 100):.1f} %" if float(row.get("equity") or 0) else "–",
-                    "Stop-Loss": round(float(p.get("stop", 0)), 4) if p.get("stop") is not None else "–",
+                    "Stop (aktuell)": round(float(p.get("cur_stop", p.get("stop", 0))), 4) if p.get("stop") is not None else "–",
                     "Take-Profit": round(float(p.get("target", 0)), 4) if p.get("target") is not None else "–",
+                    "Score": round(float(p["score"]), 0) if p.get("score") is not None else "–",
                 }
                 for p in positions
             ])
@@ -4016,7 +4069,14 @@ def render_live_paper_trading():
 # Live-Scan über das gesamte Universum: stärkste Long-/Short-Muster
 # ------------------------------------------------------------
 def batch_load_ohlc(tickers: list[str], interval_key: str) -> dict[str, pd.DataFrame]:
-    """Lädt mehrere Ticker in einem yfinance-Aufruf statt einzeln (deutlich schneller)."""
+    """Lädt mehrere Ticker in einem yfinance-Aufruf statt einzeln (deutlich schneller).
+    Ergebnisse werden 2 Minuten gecacht."""
+    cached = _batch_load_ohlc_cached(tuple(dict.fromkeys(tickers)), interval_key)
+    return {ticker: df.copy() for ticker, df in cached.items()}
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=50)
+def _batch_load_ohlc_cached(tickers: tuple[str, ...], interval_key: str) -> dict[str, pd.DataFrame]:
+    tickers = list(tickers)
     cfg = INTERVAL_CONFIG[interval_key]
     result: dict[str, pd.DataFrame] = {}
     if not tickers:
@@ -4154,7 +4214,11 @@ def scan_extreme_patterns(
     )
     return bullish_df, bearish_df
 
+WICHTIG_CLASS = "⭐ Wichtig"
+
 def _filter_universe_by_class(universe: dict[str, str], asset_class: str) -> dict[str, str]:
+    if asset_class == WICHTIG_CLASS:
+        return {f"⭐ {label}": ticker for label, ticker in get_wichtig_assets().items()}
     if asset_class == "Nur Krypto":
         return {label: ticker for label, ticker in universe.items() if ticker.endswith("-USD")}
     if asset_class == "Nur Aktien":
@@ -4163,6 +4227,10 @@ def _filter_universe_by_class(universe: dict[str, str], asset_class: str) -> dic
 
 def _run_and_store_extreme_scan(interval_key: str, limit: int, asset_class: str = "Alle") -> None:
     universe = _filter_universe_by_class(trade_republic_universe(SCANNER_UNIVERSE), asset_class)
+    if asset_class in ("Alle", "Nur Aktien"):
+        # ⭐ Wichtig-Assets immer zuerst und immer im Scan, egal wie klein das Limit ist
+        universe = dict(with_wichtig_first(universe))
+        limit = max(limit, len(get_wichtig_assets()))
     bullish_df, bearish_df = scan_extreme_patterns(universe, interval_key, limit)
     st.session_state.extreme_bullish = bullish_df
     st.session_state.extreme_bearish = bearish_df
@@ -4194,8 +4262,10 @@ def render_extreme_pattern_scanner():
             "Yahoo Finance, die periodisch neu geladen werden."
         )
         extreme_asset_class = st.radio(
-            "Asset-Klasse", ["Alle", "Nur Aktien", "Nur Krypto"],
+            "Asset-Klasse", [WICHTIG_CLASS, "Alle", "Nur Aktien", "Nur Krypto"],
             horizontal=True, key="extreme_asset_class",
+            help="⭐ Wichtig = deine Watchlist. Bei „Alle“/„Nur Aktien“ werden die Wichtig-Assets "
+                 "außerdem immer zuerst gescannt.",
         )
         filtered_universe = _filter_universe_by_class(_tr_universe, extreme_asset_class)
         col_a, col_b, col_c = st.columns(3)
@@ -4379,6 +4449,7 @@ def run_autonomous_portfolio_scan(
                     "Ergebnis": round(pnl, 2), "Warum": close_reason,
                 })
             else:
+                position["_last_price"] = price  # für korrekte Mark-to-Market-Bewertung unten
                 still_open.append(position)
         positions = still_open
         held_tickers = {p["ticker"] for p in positions}
@@ -4388,7 +4459,7 @@ def run_autonomous_portfolio_scan(
     free_slots = max_positions - len(positions)
     if free_slots > 0 and account["cash"] > 1.0:
         universe_items = [
-            (label, ticker) for label, ticker in list(SCANNER_UNIVERSE.items())[:scan_limit]
+            (label, ticker) for label, ticker in with_wichtig_first(SCANNER_UNIVERSE, scan_limit)
             if ticker not in held_tickers
         ]
         scan_tickers = [ticker for _, ticker in universe_items]
@@ -4637,10 +4708,179 @@ def render_market_scanner_paper_bot():
             except Exception:
                 st.warning("Chart konnte gerade nicht geladen werden.")
 
+# ------------------------------------------------------------
+# ⭐ Wichtig-Watchlist: immer im Blick
+# ------------------------------------------------------------
+_WICHTIG_PERIOD = {"15m": "59d", "1h": "180d", "1d": "2y"}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _wichtig_snapshot(assets: tuple[tuple[str, str], ...], interval: str) -> list[dict]:
+    data = bot_download_many([ticker for _, ticker in assets], _WICHTIG_PERIOD[interval], interval)
+    rows = []
+    for label, ticker in assets:
+        df = data.get(ticker)
+        analysis = bot_analyze(df, None, ticker, label) if df is not None else None
+        if not analysis:
+            rows.append({"Asset": label, "Ticker": ticker, "Kurs": None, "Heute %": None, "Signal": "keine Daten",
+                         "Score": None, "RSI": None, "ADX": None, "Stop": None, "Ziel": None, "_fresh": False})
+            continue
+        direction = analysis["direction"]
+        rows.append({
+            "Asset": label, "Ticker": ticker,
+            "Kurs": round(analysis["price"], 4),
+            "Heute %": round(analysis["day_change"], 2) if analysis["day_change"] is not None else None,
+            "Signal": "📈 Long" if direction == "long" else "📉 Short" if direction == "short" else "– abwarten",
+            "Score": analysis["score"] if direction != "flat" else None,
+            "RSI": round(analysis["rsi"], 1), "ADX": round(analysis["adx"], 1),
+            "Stop": round(analysis["stop"], 4) if analysis["stop"] is not None else None,
+            "Ziel": round(analysis["target"], 4) if analysis["target"] is not None else None,
+            "_fresh": bool(analysis.get("fresh")) and direction != "flat",
+        })
+    return rows
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _bot_holdings() -> dict[str, list[str]]:
+    """Welcher Bot hält gerade welches Asset? {ticker: ["🐣 Jerry Long", ...]}"""
+    client = get_supabase_client()
+    if client is None:
+        return {}
+    holdings: dict[str, list[str]] = {}
+    try:
+        keys = {v["account_key"]: k for k, v in BOT_VARIANTS.items()}
+        rows = client.table("scanner_paper_accounts").select("account_key,position").in_("account_key", list(keys)).execute().data or []
+    except Exception:
+        return {}
+    for row in rows:
+        bot_key = keys.get(row.get("account_key"))
+        positions = row.get("position")
+        if isinstance(positions, dict):
+            positions = positions.get("positions", [positions])
+        for p in positions if isinstance(positions, list) else []:
+            if isinstance(p, dict) and p.get("ticker"):
+                side = "Short" if p.get("side") == "short" else "Long"
+                holdings.setdefault(p["ticker"], []).append(f"{BOT_MASCOTS[bot_key]['emoji']} {BOT_MASCOTS[bot_key]['name']} {side}")
+    return holdings
+
+def _color_change(value):
+    if value is None or pd.isna(value):
+        return ""
+    return "color: #26a69a; font-weight: 600;" if value > 0 else "color: #ef5350; font-weight: 600;" if value < 0 else ""
+
+def _render_wichtig_table(interval: str, sort_by: str, alert_pct: float):
+    assets = get_wichtig_assets()
+    with st.spinner(f"Lade {len(assets)} ⭐ Wichtig-Assets..."):
+        rows = _wichtig_snapshot(tuple(assets.items()), interval)
+    holdings = _bot_holdings()
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.info("Die Wichtig-Liste ist leer -- unten unter „Watchlist bearbeiten“ Assets hinzufügen.")
+        return
+    df["Bots"] = df["Ticker"].map(lambda t: ", ".join(holdings.get(t, [])) or "–")
+
+    if sort_by == "Tagesbewegung":
+        df = df.sort_values("Heute %", ascending=False, na_position="last")
+    elif sort_by == "Signal-Score":
+        df = df.sort_values("Score", ascending=False, na_position="last")
+
+    up = int((df["Heute %"] > 0).sum())
+    down = int((df["Heute %"] < 0).sum())
+    signals = int(df["Score"].notna().sum())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Assets", len(df))
+    m2.metric("Im Plus", up)
+    m3.metric("Im Minus", down)
+    m4.metric("Aktive Signale", signals)
+
+    big_moves = df[df["Heute %"].abs() >= alert_pct]
+    fresh = df[df["_fresh"] & (df["Score"].fillna(0) >= 50)]
+    if not big_moves.empty or not fresh.empty:
+        lines = [f"**{r['Asset']}** ({r['Ticker']}) bewegt sich heute {r['Heute %']:+.2f} %" for _, r in big_moves.iterrows()]
+        lines += [f"**{r['Asset']}**: frisches {r['Signal']}-Signal, Score {r['Score']:.0f}" for _, r in fresh.iterrows()]
+        st.warning("⚠️ **Achtung bei deinen wichtigen Assets:**\n\n" + "\n\n".join(f"- {line}" for line in lines))
+
+    visible = df.drop(columns=["_fresh"])
+    try:
+        styled = visible.style.map(_color_change, subset=["Heute %"])
+    except AttributeError:  # pandas < 2.1
+        styled = visible.style.applymap(_color_change, subset=["Heute %"])
+    st.dataframe(
+        styled, use_container_width=True, hide_index=True, height=min(38 * (len(visible) + 1), 900),
+        column_config={
+            "Heute %": st.column_config.NumberColumn("Heute %", format="%+.2f %%"),
+            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.0f"),
+            "Kurs": st.column_config.NumberColumn("Kurs", format="%.2f"),
+        },
+    )
+    st.caption(
+        f"Stand: {datetime.now(ZoneInfo('Europe/Berlin')).strftime('%d.%m.%Y %H:%M:%S')} Uhr · Kurse von Yahoo Finance "
+        "in Börsenwährung (TR zeigt Euro-Kurse, die Prozentbewegung ist vergleichbar). Signal/Score = dieselbe "
+        "Logik, mit der Jerry/Jan/Joseph handeln. Keine Anlageberatung."
+    )
+
+def render_wichtig_watchlist():
+    with st.expander("⭐ Wichtig-Watchlist · immer im Blick", expanded=True):
+        st.caption(
+            "Deine wichtigsten Assets. Sie werden in jedem Scan zuerst geprüft, im Extreme-Pattern-Scanner "
+            "gibt es dafür die Option „⭐ Wichtig“, und Jerry, Jan und Joseph schauen bei JEDEM Lauf darauf "
+            "(der Rest des Marktes wird rotierend gescannt)."
+        )
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            interval = st.selectbox("Signal-Zeitrahmen", ["1d", "1h", "15m"], key="wichtig_interval",
+                                    help="1d = wie Joseph, 1h = wie Jan, 15m = wie Jerry")
+        with col_b:
+            sort_by = st.selectbox("Sortierung", ["Tagesbewegung", "Signal-Score", "Liste"], key="wichtig_sort")
+        with col_c:
+            alert_pct = st.number_input("Alarm ab Tagesbewegung (%)", min_value=0.5, max_value=20.0,
+                                        value=3.0, step=0.5, key="wichtig_alert_pct")
+        auto = st.checkbox("Jede Minute automatisch aktualisieren (solange der Tab offen ist)",
+                           value=False, key="wichtig_autorefresh", disabled=not _HAS_FRAGMENT)
+
+        if auto and _HAS_FRAGMENT:
+            @st.fragment(run_every=60)
+            def _wichtig_fragment():
+                _render_wichtig_table(interval, sort_by, alert_pct)
+            _wichtig_fragment()
+        else:
+            if st.button("Jetzt aktualisieren", key="wichtig_refresh"):
+                _wichtig_snapshot.clear()
+                _bot_holdings.clear()
+            _render_wichtig_table(interval, sort_by, alert_pct)
+
+        with st.expander("Watchlist bearbeiten", expanded=False):
+            assets = get_wichtig_assets()
+            add_a, add_b, add_c = st.columns([2, 1, 1])
+            with add_a:
+                new_label = st.text_input("Name", key="wichtig_new_label", placeholder="z.B. Siemens")
+            with add_b:
+                new_ticker = st.text_input("Yahoo-Ticker", key="wichtig_new_ticker", placeholder="z.B. SIE.DE")
+            with add_c:
+                st.write("")
+                if st.button("Hinzufügen ＋", key="wichtig_add", use_container_width=True) and new_ticker.strip():
+                    assets[new_label.strip() or new_ticker.strip().upper()] = new_ticker.strip().upper()
+                    saved = set_wichtig_assets(assets)
+                    _wichtig_snapshot.clear()
+                    st.success("Hinzugefügt" + (" und für die Bots gespeichert." if saved else " (nur für diese Sitzung -- Supabase nicht verbunden)."))
+            to_remove = st.multiselect("Entfernen", options=list(assets.keys()), key="wichtig_remove")
+            rm_col, reset_col = st.columns(2)
+            with rm_col:
+                if st.button("Ausgewählte entfernen", key="wichtig_remove_btn", disabled=not to_remove):
+                    saved = set_wichtig_assets({l: t for l, t in assets.items() if l not in to_remove})
+                    _wichtig_snapshot.clear()
+                    st.success("Entfernt" + (" und für die Bots gespeichert." if saved else " (nur für diese Sitzung)."))
+            with reset_col:
+                if st.button("Auf Standardliste zurücksetzen", key="wichtig_reset"):
+                    set_wichtig_assets(dict(WICHTIG_DEFAULT))
+                    _wichtig_snapshot.clear()
+                    st.success("Standardliste wiederhergestellt.")
+            st.caption("Ticker im Yahoo-Finance-Format: US-Aktien direkt (NVDA), XETRA mit .DE (RHM.DE), "
+                       "Paris .PA, Amsterdam .AS, Hongkong .HK, Australien .AX, Krypto mit -USD (BTC-USD).")
+
 st.markdown('<div class="section-label">Bereich</div>', unsafe_allow_html=True)
 _bot_section = st.selectbox(
     "Bereich wählen", label_visibility="collapsed",
     options=[
+        "⭐ Wichtig-Watchlist",
         "Jerry (grün, Minuten-Trader)",
         "Jan (gelb, Stunden-Trader)",
         "Joseph (rot, Tages-Trader)",
@@ -4651,7 +4891,9 @@ _bot_section = st.selectbox(
     ],
     key="top_bot_section",
 )
-if _bot_section == "Jerry (grün, Minuten-Trader)":
+if _bot_section == "⭐ Wichtig-Watchlist":
+    render_wichtig_watchlist()
+elif _bot_section == "Jerry (grün, Minuten-Trader)":
     render_trading_bot("jerry")
 elif _bot_section == "Jan (gelb, Stunden-Trader)":
     render_trading_bot("jan")
