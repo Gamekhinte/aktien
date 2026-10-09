@@ -1,0 +1,3 @@
+# Lokale Testläufe der Bots (python jerry_bot.py --dry-run)
+.dryrun_*.json
+__pycache__/
