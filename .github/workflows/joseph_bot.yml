@@ -2,20 +2,26 @@ name: Joseph (rot, Tages-Trader)
 
 on:
   schedule:
-    # Zweimal täglich -- Joseph ist der ruhigste der drei Bots.
-    - cron: "0 7,16 * * *"
+    # Zweimal täglich (UTC): kurz nach XETRA-Eröffnung und kurz vor US-Schluss.
+    - cron: "30 7 * * *"
+    - cron: "45 19 * * *"
   workflow_dispatch: {}
+
+concurrency:
+  group: joseph-bot
+  cancel-in-progress: false
 
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: pip install pandas numpy yfinance supabase
